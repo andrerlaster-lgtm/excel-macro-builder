@@ -82,6 +82,57 @@ describe("buildSpecification", () => {
   });
 });
 
+describe("buildSpecification — preview section", () => {
+  it("marks every preview field Not applicable when no preview operation is chosen", () => {
+    const spec = buildSpecification(emptyFormData(), fixedNow);
+    expect(spec.specVersion).toBe(2);
+    expect(spec.preview.kind).toBe("not-configured");
+    expect(spec.preview.keyColumn).toBe("Not applicable");
+    expect(spec.preview.aggregate).toBe("Not applicable");
+  });
+
+  it("carries the aggregate operation shape through", () => {
+    const form = emptyFormData();
+    form.preview = {
+      kind: "aggregate",
+      keyColumn: "Region",
+      valueColumn: "Amount",
+      aggregate: "sum",
+      filterOperator: "equals",
+      filterValue: "",
+      sampleHeaders: ["Region", "Amount"],
+      sampleRows: [["East", "100"]],
+    };
+    const spec = buildSpecification(form, fixedNow);
+    expect(spec.preview.kind).toBe("aggregate");
+    expect(spec.preview.keyColumn).toBe("Region");
+    expect(spec.preview.valueColumn).toBe("Amount");
+    expect(spec.preview.aggregate).toBe("sum");
+    expect(spec.preview.filterOperator).toBe("Not applicable");
+  });
+
+  it("never puts sample rows in the specification", () => {
+    const form = emptyFormData();
+    form.preview = {
+      ...form.preview,
+      kind: "copy",
+      sampleHeaders: ["Region"],
+      sampleRows: [["CONFIDENTIAL-SAMPLE-VALUE"]],
+    };
+    const spec = buildSpecification(form, fixedNow);
+    expect(JSON.stringify(spec)).not.toContain("CONFIDENTIAL-SAMPLE-VALUE");
+    expect(spec.preview).not.toHaveProperty("sampleRows");
+    expect(spec.preview).not.toHaveProperty("sampleHeaders");
+  });
+
+  it("does not throw when an older form has no preview section at all", () => {
+    const form = emptyFormData() as Partial<ReturnType<typeof emptyFormData>>;
+    delete form.preview;
+    const spec = buildSpecification(form as ReturnType<typeof emptyFormData>, fixedNow);
+    expect(spec.preview.kind).toBe("not-configured");
+  });
+});
+
 describe("summarizeSpecification", () => {
   it("produces a plain sentence including source, match, and destination", () => {
     const form = emptyFormData();

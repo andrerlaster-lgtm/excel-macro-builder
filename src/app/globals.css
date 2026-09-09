@@ -567,3 +567,110 @@ legend {
 .kv-grid dd {
   margin: 0;
 }
+
+/* ---------------------------------------------------------------------- */
+/* Preview panel (deterministic before/after simulation)                   */
+/* ---------------------------------------------------------------------- */
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* Wide grids scroll inside themselves; the page body never scrolls sideways. */
+.table-scroll {
+  overflow-x: auto;
+  max-width: 100%;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-surface);
+}
+
+.preview-table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 0.82rem;
+}
+
+.preview-table th,
+.preview-table td {
+  /* Containing block for the .visually-hidden labels inside: without this
+     they resolve against the page and, in a wide scrolling table, land past
+     the right edge and give the whole document a horizontal scrollbar. */
+  position: relative;
+  text-align: left;
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--color-border);
+  white-space: nowrap;
+  vertical-align: middle;
+}
+
+.preview-table thead th {
+  background: var(--color-surface-muted);
+  font-weight: 700;
+  position: sticky;
+  top: 0;
+}
+
+.preview-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.preview-table--editable td {
+  padding: 4px 6px;
+}
+
+.grid-input {
+  min-width: 110px;
+  padding: 5px 8px;
+  font-size: 0.82rem;
+}
+
+.preview-blank {
+  color: var(--color-text-muted);
+  font-style: italic;
+}
+
+.preview-empty-cell {
+  color: var(--color-text-muted);
+  font-style: italic;
+}
+
+.btn--small {
+  padding: 4px 9px;
+  font-size: 0.75rem;
+}
+
+.preview-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 16px;
+  align-items: start;
+}
+
+.preview-table-block {
+  min-width: 0;
+}
+
+.preview-table-title {
+  font-size: 0.85rem;
+  font-weight: 700;
+  margin: 14px 0 6px;
+}
+
+.preview-table-block .preview-table-title {
+  margin-top: 0;
+}
+
+.preview-rowcount {
+  font-size: 0.75rem;
+  color: var(--color-text-muted);
+  margin: 6px 0 0;
+}

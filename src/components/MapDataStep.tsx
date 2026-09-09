@@ -1,11 +1,84 @@
 "use client";
 
-import { AppendOrOverwrite, DataMapping, RunConfig, TriggerMode } from "@/lib/types";
+import {
+  AggregateFn,
+  AppendOrOverwrite,
+  DataMapping,
+  FilterOperator,
+  PreviewConfig,
+  PreviewOperationKind,
+  RunConfig,
+  TriggerMode,
+} from "@/lib/types";
 import { FieldError } from "@/lib/formValidation";
-import { MaybeField, TextField } from "./FormFields";
+import { parseSampleData } from "@/lib/previewSimulator";
+import { FieldWrapper, MaybeField, TextField } from "./FormFields";
 
 function errFor(errors: FieldError[], field: string): string | undefined {
   return errors.find((e) => e.field === field)?.message;
+}
+
+const PREVIEW_KIND_OPTIONS: { value: PreviewOperationKind; label: string }[] = [
+  { value: "not-configured", label: "No preview" },
+  { value: "copy", label: "Copy rows as-is" },
+  { value: "filter", label: "Filter rows" },
+  { value: "deduplicate", label: "Remove duplicates" },
+  { value: "aggregate", label: "Group and total" },
+];
+
+const AGGREGATE_OPTIONS: { value: AggregateFn; label: string }[] = [
+  { value: "sum", label: "Sum" },
+  { value: "count", label: "Count" },
+  { value: "average", label: "Average" },
+  { value: "min", label: "Min" },
+  { value: "max", label: "Max" },
+];
+
+const FILTER_OPERATOR_OPTIONS: { value: FilterOperator; label: string }[] = [
+  { value: "equals", label: "equals" },
+  { value: "not-equals", label: "does not equal" },
+  { value: "contains", label: "contains" },
+  { value: "greater-than", label: "is greater than" },
+  { value: "less-than", label: "is less than" },
+  { value: "is-blank", label: "is blank" },
+  { value: "is-not-blank", label: "is not blank" },
+];
+
+/**
+ * A column chooser that offers the headers typed in step 2 as a dropdown, and
+ * falls back to a free-text box when no headers have been entered yet.
+ */
+function ColumnField({
+  id,
+  label,
+  value,
+  columns,
+  onChange,
+  hint,
+}: {
+  id: string;
+  label: string;
+  value: string;
+  columns: string[];
+  onChange: (value: string) => void;
+  hint?: string;
+}) {
+  if (columns.length === 0) {
+    return <TextField id={id} label={label} value={value} onChange={onChange} hint={hint} placeholder="e.g. Region" />;
+  }
+  const matched = columns.find((c) => c.toLowerCase() === value.trim().toLowerCase()) ?? "";
+  return (
+    <FieldWrapper label={label} htmlFor={id} hint={hint}>
+      <select id={id} value={matched} onChange={(e) => onChange(e.target.value)}>
+        <option value="">Choose a column…</option>
+        {columns.map((c) => (
+          <option key={c} value={c}>
+            {c}
+          </option>
+        ))}
+      </select>
+    </FieldWrapper>
+  );
 }
 
 const TRIGGER_OPTIONS: { value: TriggerMode; label: string }[] = [
@@ -24,17 +97,45 @@ const APPEND_OPTIONS: { value: AppendOrOverwrite; label: string }[] = [
 export function MapDataStep({
   mapping,
   run,
+  preview,
   onMappingChange,
   onRunChange,
+  onPreviewChange,
   errors,
 }: {
   mapping: DataMapping;
   run: RunConfig;
+  preview: PreviewConfig;
   onMappingChange: (mapping: DataMapping) => void;
   onRunChange: (run: RunConfig) => void;
+  onPreviewChange: (preview: PreviewConfig) => void;
   errors: FieldError[];
 }) {
   const isEventDriven = run.trigger === "workbook-open" || run.trigger === "sheet-change";
+
+  const seeded = parseSampleData(
+    mapping.sourceColumnHeaders,
+    mapping.sourceExampleRows.notApplicable ? "" : mapping.sourceExampleRows.value
+  );
+
+  function handlePreviewKind(kind: PreviewOperationKind) {
+    if (kind === "not-configured") {
+      onPreviewChange({ ...preview, kind });
+      return;
+    }
+    // Seed the editable grid from step 2's free text the first time a
+    // preview operation is chosen; never clobber an edited grid.
+    const needsSeed = preview.sampleHeaders.length === 0;
+    onPreviewChange({
+      ...preview,
+      kind,
+      sampleHeaders: needsSeed ? seeded.headers : preview.sampleHeaders,
+      sampleRows: needsSeed ? seeded.rows : preview.sampleRows,
+    });
+  }
+
+  const previewColumns = preview.sampleHeaders.length > 0 ? preview.sampleHeaders : seeded.headers;
+  const filterNeedsValue = preview.filterOperator !== "is-blank" && preview.filterOperator !== "is-not-blank";
 
   return (
     <div className="card">
@@ -202,6 +303,100 @@ export function MapDataStep({
           ))}
         </div>
       </fieldset>
+
+      <h3 className="section-heading">Preview operation — optional</h3>
+      <p className="card-subtitle">
+        Pick the closest match to what you described and step 3 will compute a before/after example from your sample
+        rows. This is optional and it does not change the generated VBA — the free-text rules above are still the
+        source of truth for generation.
+      </p>
+
+      <fieldset>
+        <legend>Which operation should the preview simulate?</legend>
+        <div className="radio-group" role="radiogroup" aria-label="Preview operation">
+          {PREVIEW_KIND_OPTIONS.map((opt) => (
+            <label className="radio-option" key={opt.value}>
+              <input
+                type="radio"
+                name="previewKind"
+                value={opt.value}
+                checked={preview.kind === opt.value}
+                onChange={() => handlePreviewKind(opt.value)}
+              />
+              {opt.label}
+            </label>
+          ))}
+        </div>
+      </fieldset>
+
+      {(preview.kind === "filter" || preview.kind === "deduplicate" || preview.kind === "aggregate") && (
+        <ColumnField
+          id="previewKeyColumn"
+          label={preview.kind === "filter" ? "Column to test" : "Group/key column"}
+          value={preview.keyColumn}
+          columns={previewColumns}
+          onChange={(v) => onPreviewChange({ ...preview, keyColumn: v })}
+          hint={
+            previewColumns.length === 0
+              ? "Enter your column headers above to pick from a list instead."
+              : undefined
+          }
+        />
+      )}
+
+      {preview.kind === "filter" && (
+        <div className="field-row">
+          <FieldWrapper label="Condition" htmlFor="previewFilterOperator">
+            <select
+              id="previewFilterOperator"
+              value={preview.filterOperator}
+              onChange={(e) => onPreviewChange({ ...preview, filterOperator: e.target.value as FilterOperator })}
+            >
+              {FILTER_OPERATOR_OPTIONS.map((opt) => (
+                <option key={opt.value} value={opt.value}>
+                  {opt.label}
+                </option>
+              ))}
+            </select>
+          </FieldWrapper>
+          {filterNeedsValue && (
+            <TextField
+              id="previewFilterValue"
+              label="Compared with"
+              value={preview.filterValue}
+              onChange={(v) => onPreviewChange({ ...preview, filterValue: v })}
+              placeholder="e.g. East"
+            />
+          )}
+        </div>
+      )}
+
+      {preview.kind === "aggregate" && (
+        <div className="field-row">
+          <FieldWrapper label="Calculation" htmlFor="previewAggregate">
+            <select
+              id="previewAggregate"
+              value={preview.aggregate}
+              onChange={(e) => onPreviewChange({ ...preview, aggregate: e.target.value as AggregateFn })}
+            >
+              {AGGREGATE_OPTIONS.map((opt) => (
+                <option key={opt.value} value={opt.value}>
+                  {opt.label}
+                </option>
+              ))}
+            </select>
+          </FieldWrapper>
+          {preview.aggregate !== "count" && (
+            <ColumnField
+              id="previewValueColumn"
+              label="Value column (numeric)"
+              value={preview.valueColumn}
+              columns={previewColumns}
+              onChange={(v) => onPreviewChange({ ...preview, valueColumn: v })}
+            />
+          )}
+        </div>
+      )}
 
       <h3 className="section-heading">How the macro is started</h3>
       <fieldset>

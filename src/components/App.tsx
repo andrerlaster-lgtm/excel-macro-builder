@@ -16,6 +16,7 @@ import { Stepper, StepDef } from "./Stepper";
 import { DescribeStep } from "./DescribeStep";
 import { MapDataStep } from "./MapDataStep";
 import { ReviewStep } from "./ReviewStep";
+import { PreviewPanel } from "./PreviewPanel";
 import { ResultPanel } from "./ResultPanel";
 import { ProjectSidebar } from "./ProjectSidebar";
 
@@ -238,14 +239,21 @@ export function App() {
             <MapDataStep
               mapping={form.mapping}
               run={form.run}
+              preview={form.preview}
               onMappingChange={(mapping) => handleFormChange({ ...form, mapping })}
               onRunChange={(run) => handleFormChange({ ...form, run })}
+              onPreviewChange={(preview) => handleFormChange({ ...form, preview })}
               errors={stepErrors}
             />
           )}
           {stepIndex === 2 && (
             <>
               <ReviewStep form={form} aiConfigured={aiConfigured} />
+              <PreviewPanel
+                mapping={form.mapping}
+                preview={form.preview}
+                onPreviewChange={(preview) => handleFormChange({ ...form, preview })}
+              />
               {generationError && (
                 <div className="callout callout--red" role="alert" style={{ marginTop: 16 }}>
                   <span className="callout-title">Generation problem</span>

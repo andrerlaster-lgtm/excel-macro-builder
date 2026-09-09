@@ -58,10 +58,61 @@ export interface RunConfig {
   mustNotChange: Maybe;
 }
 
+// ---------------------------------------------------------------------------
+// Preview configuration.
+//
+// This describes a small, structured version of the operation the user says
+// they want, purely so the app can compute a deterministic before/after
+// example in the browser. It is NOT what generates the VBA -- the free-text
+// rule fields in DataMapping remain the source of truth for generation, and
+// the preview never executes or inspects the generated code.
+// ---------------------------------------------------------------------------
+
+export type PreviewOperationKind = "not-configured" | "copy" | "filter" | "aggregate" | "deduplicate";
+
+export type AggregateFn = "sum" | "count" | "average" | "min" | "max";
+
+export type FilterOperator =
+  | "equals"
+  | "not-equals"
+  | "contains"
+  | "greater-than"
+  | "less-than"
+  | "is-blank"
+  | "is-not-blank";
+
+export interface PreviewConfig {
+  kind: PreviewOperationKind;
+  /** group-by column (aggregate/deduplicate) or column under test (filter) */
+  keyColumn: string;
+  /** numeric column to aggregate */
+  valueColumn: string;
+  aggregate: AggregateFn;
+  filterOperator: FilterOperator;
+  filterValue: string;
+  /** Editable sample grid used by the preview. Seeded from mapping.sourceExampleRows. */
+  sampleHeaders: string[];
+  sampleRows: string[][];
+}
+
+export function emptyPreviewConfig(): PreviewConfig {
+  return {
+    kind: "not-configured",
+    keyColumn: "",
+    valueColumn: "",
+    aggregate: "sum",
+    filterOperator: "equals",
+    filterValue: "",
+    sampleHeaders: [],
+    sampleRows: [],
+  };
+}
+
 export interface MacroFormData {
   task: TaskDescription;
   mapping: DataMapping;
   run: RunConfig;
+  preview: PreviewConfig;
 }
 
 export function emptyFormData(): MacroFormData {
@@ -98,6 +149,7 @@ export function emptyFormData(): MacroFormData {
       constraints: emptyMaybe(),
       mustNotChange: emptyMaybe(),
     },
+    preview: emptyPreviewConfig(),
   };
 }
 
@@ -107,7 +159,8 @@ export function emptyFormData(): MacroFormData {
 // ---------------------------------------------------------------------------
 
 export interface MacroSpecification {
-  specVersion: 1;
+  /** 1 = original shape; 2 added the `preview` section. */
+  specVersion: 2;
   generatedAt: string;
   projectTitle: string;
   macroName: string;
@@ -144,6 +197,20 @@ export interface MacroSpecification {
     trigger: TriggerMode;
     constraints: string | "Not applicable";
     mustNotChange: string | "Not applicable";
+  };
+  /**
+   * The shape of the operation the user picked for the in-browser preview.
+   * Deliberately carries NO sample rows: those are illustrative, may be
+   * pasted from real data, and are never worth sending to an AI provider.
+   * Only the operation shape travels.
+   */
+  preview: {
+    kind: PreviewOperationKind;
+    keyColumn: string | "Not applicable";
+    valueColumn: string | "Not applicable";
+    aggregate: AggregateFn | "Not applicable";
+    filterOperator: FilterOperator | "Not applicable";
+    filterValue: string | "Not applicable";
   };
 }
 

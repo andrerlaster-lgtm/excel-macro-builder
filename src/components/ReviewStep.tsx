@@ -130,6 +130,10 @@ export function ReviewStep({
           <dt>Must not change</dt>
           <dd>{spec.execution.mustNotChange}</dd>
         </div>
+        <div>
+          <dt>Preview operation</dt>
+          <dd>{spec.preview.kind === "not-configured" ? "Not applicable" : spec.preview.kind}</dd>
+        </div>
       </dl>
 
       {!aiConfigured && (

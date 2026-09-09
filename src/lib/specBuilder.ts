@@ -1,10 +1,51 @@
-import { MacroFormData, MacroSpecification, Maybe } from "./types";
+import { MacroFormData, MacroSpecification, Maybe, PreviewConfig } from "./types";
 
 const NOT_APPLICABLE = "Not applicable" as const;
 
 function fromMaybe(m: Maybe): string | "Not applicable" {
   if (m.notApplicable) return NOT_APPLICABLE;
   return m.value.trim().length > 0 ? m.value.trim() : NOT_APPLICABLE;
+}
+
+function fromText(value: string): string | "Not applicable" {
+  return value.trim().length > 0 ? value.trim() : NOT_APPLICABLE;
+}
+
+/**
+ * Projects the preview picker into the specification.
+ *
+ * Deliberate omission: `sampleHeaders` / `sampleRows` never leave the
+ * browser. They exist only to draw the local before/after example, they are
+ * frequently pasted from a user's real workbook, and the generator does not
+ * need them. Only the operation shape is included.
+ */
+function previewSection(preview: PreviewConfig | undefined): MacroSpecification["preview"] {
+  // `preview` can legitimately be absent: older saved drafts and hand-posted
+  // request bodies predate this section.
+  if (!preview || preview.kind === "not-configured") {
+    return {
+      kind: "not-configured",
+      keyColumn: NOT_APPLICABLE,
+      valueColumn: NOT_APPLICABLE,
+      aggregate: NOT_APPLICABLE,
+      filterOperator: NOT_APPLICABLE,
+      filterValue: NOT_APPLICABLE,
+    };
+  }
+  const usesKey = preview.kind !== "copy";
+  const isAggregate = preview.kind === "aggregate";
+  const isFilter = preview.kind === "filter";
+  return {
+    kind: preview.kind,
+    keyColumn: usesKey ? fromText(preview.keyColumn) : NOT_APPLICABLE,
+    valueColumn: isAggregate && preview.aggregate !== "count" ? fromText(preview.valueColumn) : NOT_APPLICABLE,
+    aggregate: isAggregate ? preview.aggregate : NOT_APPLICABLE,
+    filterOperator: isFilter ? preview.filterOperator : NOT_APPLICABLE,
+    filterValue:
+      isFilter && preview.filterOperator !== "is-blank" && preview.filterOperator !== "is-not-blank"
+        ? fromText(preview.filterValue)
+        : NOT_APPLICABLE,
+  };
 }
 
 /**
@@ -15,7 +56,7 @@ function fromMaybe(m: Maybe): string | "Not applicable" {
  */
 export function buildSpecification(form: MacroFormData, now: () => string = () => new Date().toISOString()): MacroSpecification {
   return {
-    specVersion: 1,
+    specVersion: 2,
     generatedAt: now(),
     projectTitle: form.task.projectTitle.trim(),
     macroName: form.task.macroName.trim(),
@@ -53,6 +94,7 @@ export function buildSpecification(form: MacroFormData, now: () => string = () =
       constraints: fromMaybe(form.run.constraints),
       mustNotChange: fromMaybe(form.run.mustNotChange),
     },
+    preview: previewSection(form.preview),
   };
 }
 

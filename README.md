@@ -17,12 +17,43 @@ into Excel yourself.
    Anything that doesn't apply to your task can be explicitly marked
    **Not applicable** instead of forcing you to invent details.
 3. **Review and generate** — see the exact structured specification that will
-   be sent for generation, resolve anything left ambiguous, then generate.
+   be sent for generation, resolve anything left ambiguous, preview a
+   before/after example (below), then generate.
 
 The generated result includes: the VBA code (editable), a plain-language
 summary, assumptions the model made, open questions that could change the
 result, expected inputs/outputs, install/run instructions, a test plan for a
 **copy** of your workbook, safety cautions, and platform limitations.
+
+## Before/after preview
+
+Step 2 has an optional **Preview operation** picker (copy, filter, remove
+duplicates, or group-and-total). When you choose one, step 3 shows a
+**Before** and **After** table computed from a small editable sample grid,
+seeded from the column headers and example rows you typed in step 2. You can
+edit any cell, add or remove rows, or reseed from step 2, and the result
+recomputes instantly.
+
+- **No API key required.** The whole thing is a pure, deterministic function
+  (`src/lib/previewSimulator.ts`) running in your browser. Nothing is sent
+  anywhere, and your sample rows are deliberately excluded from the
+  specification that goes to the AI provider — only the operation shape
+  (kind, columns, aggregate function, filter operator) travels.
+- **It does not execute the generated VBA.** This is the important part. The
+  preview simulates *the operation you described with the picker*, not the
+  code the model wrote. It cannot prove the macro behaves the same way, and
+  the on-screen amber caution says so. The free-text rule fields on step 2
+  remain the source of truth for generation, and the real macro can do
+  something the preview does not show. Still read the code and test it on a
+  copy of your workbook.
+- Stages apply in a fixed order: filter → deduplicate → aggregate, with
+  aggregate/deduplicate output sorted by key ascending. Deduplicate always
+  keeps the *first* row per key, which may differ from your free-text
+  "Duplicate handling" rule; the preview says so in its step narrative.
+- Non-numeric values in an aggregated column are **skipped and reported**,
+  never silently coerced to zero. Currency and thousands separators
+  (`$1,234.50`) parse correctly. Simulation is capped at 500 rows and 50
+  columns, and truncation is noted.
 
 ## Setup
 
@@ -73,14 +104,16 @@ backend database). Layers are kept separable and unit-tested:
   never evals/executes anything; fails honestly on malformed output.
 - `src/lib/safetyScanner.ts` — a pure, unit-tested static pattern scan over
   generated VBA text (see Safety below).
+- `src/lib/previewSimulator.ts` — pure, deterministic before/after simulation
+  of the structured preview operation. No DOM, no network, no VBA execution.
 - `src/lib/filename.ts` — derives a safe `.bas` filename.
 - `src/lib/storage.ts` — versioned browser localStorage for saved projects,
   with a migration function for future schema changes.
 - `src/app/api/generate/route.ts` — the only server route that calls OpenAI
   (Node.js runtime, not edge — required for the SDK). Re-validates the form
   server-side before calling the provider.
-- `src/components/*` — the guided three-step UI, result panel, and project
-  sidebar.
+- `src/components/*` — the guided three-step UI, before/after preview panel,
+  result panel, and project sidebar.
 
 ## Local data / storage limitations
 

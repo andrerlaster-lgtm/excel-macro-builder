@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { emptyFormData } from "./types";
+import { emptyFormData, emptyPreviewConfig } from "./types";
+import { simulatePreview } from "./previewSimulator";
 import {
   CURRENT_SCHEMA_VERSION,
   createProject,
@@ -84,6 +85,42 @@ describe("storage", () => {
     expect(migrated?.schemaVersion).toBe(CURRENT_SCHEMA_VERSION);
     expect(migrated?.archived).toBe(false);
     expect(migrated?.lastResult).toBeNull();
+  });
+
+  it("migrates a v1 record forward to v2 with a usable default preview config", () => {
+    const v1Form = emptyFormData() as Partial<ReturnType<typeof emptyFormData>>;
+    delete v1Form.preview; // v1 forms had no preview section
+    const v1Record = {
+      id: "v1-project",
+      schemaVersion: 1,
+      title: "Pre-preview Draft",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      archived: false,
+      form: v1Form,
+      lastSpecification: null,
+      lastResult: null,
+    };
+
+    const migrated = migrateProject(v1Record);
+    expect(migrated).not.toBeNull();
+    expect(migrated?.schemaVersion).toBe(2);
+    expect(migrated?.title).toBe("Pre-preview Draft");
+    expect(migrated?.form.preview).toEqual(emptyPreviewConfig());
+    // ...and it is immediately usable by the simulator without throwing.
+    expect(simulatePreview(migrated!.form.preview).status).toBe("not-configured");
+  });
+
+  it("repairs a partially-written preview config instead of trusting it", () => {
+    const migrated = migrateProject({
+      id: "half-written",
+      schemaVersion: 2,
+      form: { ...emptyFormData(), preview: { kind: "copy", sampleRows: "not an array" } },
+    });
+    expect(migrated?.form.preview.kind).toBe("copy");
+    expect(migrated?.form.preview.sampleRows).toEqual([]);
+    expect(migrated?.form.preview.sampleHeaders).toEqual([]);
+    expect(migrated?.form.preview.aggregate).toBe("sum");
   });
 
   it("drops unparseable records instead of crashing", () => {

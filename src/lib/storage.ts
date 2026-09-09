@@ -1,11 +1,11 @@
-import { emptyFormData, MacroFormData, SavedProject } from "./types";
+import { emptyFormData, emptyPreviewConfig, MacroFormData, PreviewConfig, SavedProject } from "./types";
 
 // Bump this and add a migration step in `migrateProject` whenever the saved
 // project shape changes. No permanent delete UI exists in this phase --
 // archiving is the only removal path; use browser site-data controls to
 // actually clear storage (documented in the README).
 
-export const CURRENT_SCHEMA_VERSION = 1;
+export const CURRENT_SCHEMA_VERSION = 2;
 export const STORAGE_KEY = "excel-macro-builder:projects:v1";
 
 interface StorageEnvelope {
@@ -22,6 +22,35 @@ function safeRandomId(): string {
 
 function isPlainObject(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+/**
+ * v1 -> v2: `form.preview` did not exist. Backfill it (and repair a
+ * partially-written one) so older drafts open with a usable, unconfigured
+ * preview instead of crashing the review step.
+ */
+function migrateFormToV2(form: MacroFormData): MacroFormData {
+  const raw = (form as unknown as Record<string, unknown>).preview;
+  if (!isPlainObject(raw)) {
+    return { ...form, preview: emptyPreviewConfig() };
+  }
+  const defaults = emptyPreviewConfig();
+  const preview: PreviewConfig = {
+    kind: typeof raw.kind === "string" ? (raw.kind as PreviewConfig["kind"]) : defaults.kind,
+    keyColumn: typeof raw.keyColumn === "string" ? raw.keyColumn : defaults.keyColumn,
+    valueColumn: typeof raw.valueColumn === "string" ? raw.valueColumn : defaults.valueColumn,
+    aggregate: typeof raw.aggregate === "string" ? (raw.aggregate as PreviewConfig["aggregate"]) : defaults.aggregate,
+    filterOperator:
+      typeof raw.filterOperator === "string"
+        ? (raw.filterOperator as PreviewConfig["filterOperator"])
+        : defaults.filterOperator,
+    filterValue: typeof raw.filterValue === "string" ? raw.filterValue : defaults.filterValue,
+    sampleHeaders: Array.isArray(raw.sampleHeaders) ? raw.sampleHeaders.map((h) => String(h ?? "")) : [],
+    sampleRows: Array.isArray(raw.sampleRows)
+      ? raw.sampleRows.map((row) => (Array.isArray(row) ? row.map((c) => String(c ?? "")) : []))
+      : [],
+  };
+  return { ...form, preview };
 }
 
 /**
@@ -42,14 +71,16 @@ export function migrateProject(raw: unknown): SavedProject | null {
     createdAt: typeof raw.createdAt === "string" ? raw.createdAt : new Date().toISOString(),
     updatedAt: typeof raw.updatedAt === "string" ? raw.updatedAt : new Date().toISOString(),
     archived: typeof raw.archived === "boolean" ? raw.archived : false,
-    form: isPlainObject(raw.form) ? (raw.form as unknown as MacroFormData) : emptyFormData(),
+    form: migrateFormToV2(isPlainObject(raw.form) ? (raw.form as unknown as MacroFormData) : emptyFormData()),
     lastSpecification: isPlainObject(raw.lastSpecification)
       ? (raw.lastSpecification as unknown as SavedProject["lastSpecification"])
       : null,
     lastResult: isPlainObject(raw.lastResult) ? (raw.lastResult as unknown as SavedProject["lastResult"]) : null,
   };
 
-  void version; // reserved for future multi-step migrations
+  // version 1 -> 2: `form.preview` added (handled by migrateFormToV2 above,
+  // which is safe to run on records that already carry it).
+  void version;
   return base;
 }
 
