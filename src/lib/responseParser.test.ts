@@ -21,6 +21,18 @@ describe("parseAiResponse", () => {
     expect(result.result?.assumptions).toEqual(["Header row is row 1."]);
   });
 
+  it("attributes every parsed result to the AI generator", () => {
+    // Attribution is set here so template output can never be mistaken for
+    // model output, or the other way round, once a project is reopened.
+    const result = parseAiResponse(JSON.stringify(validPayload));
+    expect(result.result?.generator).toBe("ai");
+  });
+
+  it("ignores a generator claimed inside the model's own JSON", () => {
+    const result = parseAiResponse(JSON.stringify({ ...validPayload, generator: "template" }));
+    expect(result.result?.generator).toBe("ai");
+  });
+
   it("fails gracefully on malformed JSON", () => {
     const result = parseAiResponse("{ this is not json");
     expect(result.ok).toBe(false);

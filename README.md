@@ -55,6 +55,48 @@ recomputes instantly.
   (`$1,234.50`) parse correctly. Simulation is capped at 500 rows and 50
   columns, and truncation is noted.
 
+## Deterministic builder — "Build VBA without AI"
+
+Step 3 has a second button, **Build VBA without AI**, next to Generate VBA. It
+is always enabled. It assembles real VBA from a template in your browser
+(`src/lib/vbaTemplateGenerator.ts`), using the **same structured preview
+operation** that drives the before/after tables. Because the code and the
+preview come from one config, they cannot disagree about what the operation is.
+
+- **No API key, no network call, no cost.** Nothing is sent anywhere.
+- **What it supports:** the four preview operations — copy rows, filter rows,
+  remove duplicates, group and total (sum/count/average/min/max) — in the same
+  workbook or across two workbooks, appending or overwriting, with a
+  **Run manually** or **From a button** trigger.
+- **What it refuses, rather than guessing:** no preview operation picked; the
+  **On workbook open** / **On sheet change** triggers (those need an event
+  handler in `ThisWorkbook` or a sheet code module, not the standard module
+  this emits); a key or value column that isn't one of your source headers;
+  and any required source/destination field left blank. A refusal produces a
+  plain explanation and **no code at all** — never a half-built macro.
+- **It does not implement your free-text rules.** Filters, transformation
+  rules, sort order, duplicate handling, blank/error handling, constraints and
+  the must-not-change list are never parsed. Every non-empty, non-N/A one is
+  listed back to you in an amber caution in the app *and* repeated as a marked
+  comment block at the top of the generated code. It deliberately does not try
+  to detect that a sentence happens to match the picker — a wrong "already
+  handled" would be far more dangerous than a redundant reminder.
+- Semantics match the preview exactly: stages in the order filter →
+  deduplicate → aggregate, deduplicate keeps the **first** row per key,
+  aggregation **skips** blank and non-numeric values (never zero) and the macro
+  reports how many it skipped in its closing message box, currency/thousands/
+  parenthesised-negative formats parse via a dedicated VBA helper rather than
+  bare `CDbl`, and results are sorted by key ascending.
+- The output goes through the same static safety scan, the same
+  "Review before running" caution, and the same Copy / Download `.bas` /
+  editable code area as AI output. Results are tagged with the generator that
+  produced them (`ai` or `template`), and that tag is saved, so a reopened
+  project can't misattribute one as the other.
+
+**Deterministic does not mean correct, and it certainly does not mean safe.**
+The generated code has never been compiled or run by anything. Read it and test
+it on a **copy** of your workbook, exactly as you would AI output.
+
 ## Setup
 
 ```bash
@@ -81,8 +123,9 @@ npm run dev
 ### Running without an API key
 
 The app is fully usable with no key configured: the guided form, validation,
-and the structured specification (copy/download as JSON) all work. Only the
-"Generate VBA" action is disabled, with an honest on-screen message —
+the before/after preview, the structured specification (copy/download as JSON),
+and **Build VBA without AI** (see above) all work. Only the AI "Generate VBA"
+action is unavailable, with an honest on-screen message —
 **the app never pretends code was generated when it wasn't.**
 
 ## Architecture
@@ -106,6 +149,10 @@ backend database). Layers are kept separable and unit-tested:
   generated VBA text (see Safety below).
 - `src/lib/previewSimulator.ts` — pure, deterministic before/after simulation
   of the structured preview operation. No DOM, no network, no VBA execution.
+- `src/lib/vbaTemplateGenerator.ts` — pure, deterministic VBA emission from the
+  same structured operation. **Semantic counterpart of `previewSimulator.ts`:
+  a rule changed in one must be changed in the other**, and a shared-fixture
+  test pins them together. Refuses rather than guessing; never executes VBA.
 - `src/lib/filename.ts` — derives a safe `.bas` filename.
 - `src/lib/storage.ts` — versioned browser localStorage for saved projects,
   with a migration function for future schema changes.
@@ -185,8 +232,15 @@ specification generation (including that every entered field is carried
 through unmodified and "Not applicable" is never invented), AI response
 parsing (malformed/partial JSON handled honestly), the static
 dangerous-pattern scanner (one fixture per pattern category), safe `.bas`
-filename generation, localStorage migration of a legacy record, and the
-no-API-key fallback (`isAiConfigured`).
+filename generation, localStorage migration of legacy records (v1 -> v2 preview
+backfill, and v2 -> v3 attributing pre-existing saved results to the AI), the
+no-API-key fallback (`isAiConfigured`), and the deterministic VBA template
+generator (per-operation logic, `Option Explicit`/config/error-handler/
+Application-state invariants, absence of `ActiveSheet`/`Selection`/`Select`,
+every refusal path returning empty code, disclosure of free-text rules,
+same-vs-cross-workbook and append-vs-overwrite differences, the safety scan
+over its output, and a shared fixture pinning its semantics to the preview
+simulator).
 
 ## Known limitations / next steps
 

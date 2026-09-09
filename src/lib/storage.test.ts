@@ -87,7 +87,7 @@ describe("storage", () => {
     expect(migrated?.lastResult).toBeNull();
   });
 
-  it("migrates a v1 record forward to v2 with a usable default preview config", () => {
+  it("migrates a v1 record forward to the current version with a usable default preview config", () => {
     const v1Form = emptyFormData() as Partial<ReturnType<typeof emptyFormData>>;
     delete v1Form.preview; // v1 forms had no preview section
     const v1Record = {
@@ -104,11 +104,77 @@ describe("storage", () => {
 
     const migrated = migrateProject(v1Record);
     expect(migrated).not.toBeNull();
-    expect(migrated?.schemaVersion).toBe(2);
+    expect(migrated?.schemaVersion).toBe(CURRENT_SCHEMA_VERSION);
     expect(migrated?.title).toBe("Pre-preview Draft");
     expect(migrated?.form.preview).toEqual(emptyPreviewConfig());
     // ...and it is immediately usable by the simulator without throwing.
     expect(simulatePreview(migrated!.form.preview).status).toBe("not-configured");
+  });
+
+  it("migrates a v2 record forward to v3 by attributing its saved result to the AI", () => {
+    const v2Result = {
+      vbaCode: "Option Explicit\nSub Legacy()\nEnd Sub",
+      summary: "Copies rows.",
+      assumptions: ["Header row is row 1."],
+      openQuestions: [],
+      inputsOutputs: "In: Raw Data. Out: Summary.",
+      installInstructions: "Paste into a standard module.",
+      testPlan: ["Run on a copy."],
+      safetyCautions: [],
+      platformLimitations: [],
+      // note: no `generator` field -- it did not exist at v2
+    };
+    const migrated = migrateProject({
+      id: "v2-project",
+      schemaVersion: 2,
+      title: "Pre-template Draft",
+      createdAt: "2026-02-01T00:00:00.000Z",
+      updatedAt: "2026-02-01T00:00:00.000Z",
+      archived: false,
+      form: emptyFormData(),
+      lastSpecification: null,
+      lastResult: v2Result,
+    });
+
+    expect(migrated).not.toBeNull();
+    expect(migrated?.schemaVersion).toBe(3);
+    expect(migrated?.title).toBe("Pre-template Draft");
+    // The AI path was the only generator at v2, so that is the honest default.
+    // It must never be backfilled as "template", which would present model
+    // output as deterministic.
+    expect(migrated?.lastResult?.generator).toBe("ai");
+    expect(migrated?.lastResult?.vbaCode).toContain("Sub Legacy()");
+    expect(migrated?.lastResult?.assumptions).toEqual(["Header row is row 1."]);
+  });
+
+  it("leaves an already-attributed template result alone", () => {
+    const migrated = migrateProject({
+      id: "v3-project",
+      schemaVersion: 3,
+      form: emptyFormData(),
+      lastResult: {
+        vbaCode: "Option Explicit\nSub Built()\nEnd Sub",
+        summary: "",
+        assumptions: [],
+        openQuestions: [],
+        inputsOutputs: "",
+        installInstructions: "",
+        testPlan: [],
+        safetyCautions: [],
+        platformLimitations: [],
+        generator: "template",
+        unimplementedRules: [{ field: "Filters", text: "Exclude cancelled rows" }],
+      },
+    });
+    expect(migrated?.lastResult?.generator).toBe("template");
+    expect(migrated?.lastResult?.unimplementedRules).toEqual([
+      { field: "Filters", text: "Exclude cancelled rows" },
+    ]);
+  });
+
+  it("keeps a project with no saved result at null rather than inventing one", () => {
+    const migrated = migrateProject({ id: "no-result", schemaVersion: 2, form: emptyFormData() });
+    expect(migrated?.lastResult).toBeNull();
   });
 
   it("repairs a partially-written preview config instead of trusting it", () => {

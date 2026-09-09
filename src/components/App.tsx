@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { emptyFormData, MacroFormData, MacroGenerationResult, MacroSpecification, SavedProject } from "@/lib/types";
 import { validateMacroForm, FieldError } from "@/lib/formValidation";
 import { buildSpecification } from "@/lib/specBuilder";
+import { generateVbaFromTemplate } from "@/lib/vbaTemplateGenerator";
 import {
   createProject,
   duplicateProject,
@@ -43,7 +44,10 @@ export function App() {
   const [generationError, setGenerationError] = useState<string | null>(null);
   const [aiConfigured, setAiConfigured] = useState(true); // optimistic; corrected on first attempt/probe
   const [showArchived, setShowArchived] = useState(false);
-  const [pendingAction, setPendingAction] = useState<null | { kind: "new" | "clear-generate" }>(null);
+  const [templateRefusal, setTemplateRefusal] = useState<string | null>(null);
+  const [pendingAction, setPendingAction] = useState<
+    null | { kind: "new" | "clear-generate" | "clear-generate-template" }
+  >(null);
 
   useEffect(() => {
     setProjects(listProjects());
@@ -64,6 +68,7 @@ export function App() {
     setFurthest(project.lastResult ? 2 : 0);
     setErrors([]);
     setGenerationError(null);
+    setTemplateRefusal(null);
   }
 
   function persistCurrent(updates: Partial<Pick<SavedProject, "form" | "lastResult" | "lastSpecification" | "title">>) {
@@ -104,6 +109,7 @@ export function App() {
     setFurthest(0);
     setErrors([]);
     setGenerationError(null);
+    setTemplateRefusal(null);
   }
 
   function handleNewProject() {
@@ -197,11 +203,74 @@ export function App() {
   }
 
   function handleGenerateClick() {
+    setTemplateRefusal(null);
     if (result) {
       setPendingAction({ kind: "clear-generate" });
       return;
     }
     void runGeneration();
+  }
+
+  /**
+   * Deterministic path: builds VBA in the browser from the same structured
+   * preview config that drives the on-screen before/after example, so the two
+   * cannot disagree. No API key, no network call, no cost. It refuses rather
+   * than guessing whenever the request falls outside what the template covers.
+   */
+  function runTemplateGeneration() {
+    setGenerationError(null);
+    const outcome = generateVbaFromTemplate(form);
+
+    if (outcome.status === "unsupported") {
+      setTemplateRefusal(outcome.message ?? "The deterministic builder cannot build this macro.");
+      return;
+    }
+
+    setTemplateRefusal(null);
+    const spec = buildSpecification(form);
+    const templateResult: MacroGenerationResult = {
+      vbaCode: outcome.vbaCode,
+      summary: outcome.summary,
+      steps: outcome.steps,
+      assumptions: outcome.assumptions,
+      // The template asks nothing: it either builds from the structured config
+      // or refuses. Anything it did not encode is in unimplementedRules.
+      openQuestions: [],
+      inputsOutputs: `Input: the rows of "${form.mapping.sourceRangeOrTable}" on "${form.mapping.sourceWorksheet}". Output: the result written to "${form.mapping.destinationRangeOrTable}" on "${form.mapping.destinationWorksheet}". Nothing else in either workbook is read or written.`,
+      installInstructions: outcome.installInstructions,
+      testPlan: outcome.testPlan,
+      safetyCautions: outcome.safetyCautions,
+      platformLimitations: outcome.platformLimitations,
+      generator: "template",
+      unimplementedRules: outcome.unimplementedRules,
+    };
+
+    setSpecification(spec);
+    setResult(templateResult);
+    ensureProject();
+    persistCurrent({
+      form,
+      lastSpecification: spec,
+      lastResult: templateResult,
+      title: form.task.projectTitle.trim() || undefined,
+    });
+  }
+
+  function handleTemplateGenerateClick() {
+    setTemplateRefusal(null);
+    // Check first, confirm second: a refusal replaces nothing, so asking
+    // "replace the generated result?" before finding that out would be a
+    // pointless (and misleading) prompt.
+    const probe = generateVbaFromTemplate(form);
+    if (probe.status === "unsupported") {
+      setTemplateRefusal(probe.message ?? "The deterministic builder cannot build this macro.");
+      return;
+    }
+    if (result) {
+      setPendingAction({ kind: "clear-generate-template" });
+      return;
+    }
+    runTemplateGeneration();
   }
 
   function handleExportSpecOnly() {
@@ -260,6 +329,16 @@ export function App() {
                   {generationError}
                 </div>
               )}
+              {templateRefusal && (
+                <div className="callout callout--amber" role="alert" style={{ marginTop: 16 }}>
+                  <span className="callout-title">The deterministic builder will not build this</span>
+                  {templateRefusal}
+                  <p className="field-hint" style={{ marginTop: 8 }}>
+                    Nothing was generated. The builder refuses instead of guessing, because half-right VBA aimed at
+                    your workbook is worse than none.
+                  </p>
+                </div>
+              )}
               <div className="btn-row">
                 <button
                   type="button"
@@ -271,10 +350,19 @@ export function App() {
                   {generating && <span className="spinner" aria-hidden="true" />}
                   {generating ? "Generating…" : "Generate VBA"}
                 </button>
+                <button type="button" className="btn" onClick={handleTemplateGenerateClick}>
+                  Build VBA without AI
+                </button>
                 <button type="button" className="btn" onClick={handleExportSpecOnly}>
                   Download specification (.json)
                 </button>
               </div>
+              <p className="field-hint" style={{ marginTop: 8 }}>
+                &quot;Build VBA without AI&quot; runs entirely in this browser from the step 2 preview operation. It
+                needs no API key, costs nothing, sends nothing anywhere — and only covers the four structured
+                operations with a manual or button trigger. It refuses anything outside that rather than guessing,
+                and it never implements your free-text rules.
+              </p>
             </>
           )}
 
@@ -364,6 +452,7 @@ export function App() {
                   const kind = pendingAction.kind;
                   setPendingAction(null);
                   if (kind === "new") doStartNew();
+                  else if (kind === "clear-generate-template") runTemplateGeneration();
                   else void runGeneration();
                 }}
               >

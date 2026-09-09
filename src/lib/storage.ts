@@ -1,11 +1,18 @@
-import { emptyFormData, emptyPreviewConfig, MacroFormData, PreviewConfig, SavedProject } from "./types";
+import {
+  emptyFormData,
+  emptyPreviewConfig,
+  MacroFormData,
+  MacroGenerationResult,
+  PreviewConfig,
+  SavedProject,
+} from "./types";
 
 // Bump this and add a migration step in `migrateProject` whenever the saved
 // project shape changes. No permanent delete UI exists in this phase --
 // archiving is the only removal path; use browser site-data controls to
 // actually clear storage (documented in the README).
 
-export const CURRENT_SCHEMA_VERSION = 2;
+export const CURRENT_SCHEMA_VERSION = 3;
 export const STORAGE_KEY = "excel-macro-builder:projects:v1";
 
 interface StorageEnvelope {
@@ -54,6 +61,21 @@ function migrateFormToV2(form: MacroFormData): MacroFormData {
 }
 
 /**
+ * v2 -> v3: `lastResult.generator` did not exist because the AI provider was
+ * the only generator. Any saved result therefore came from the AI path, so it
+ * is backfilled as "ai" — never as "template", which would wrongly present
+ * model output as deterministic. Results that already declare a generator are
+ * left alone.
+ */
+function migrateResultToV3(raw: unknown): MacroGenerationResult | null {
+  if (!isPlainObject(raw)) return null;
+  const result = raw as unknown as MacroGenerationResult;
+  const declared = (raw as Record<string, unknown>).generator;
+  if (declared === "ai" || declared === "template") return result;
+  return { ...result, generator: "ai" };
+}
+
+/**
  * Migrates a single project record forward to the current schema version.
  * Unknown/missing fields are backfilled with safe defaults so older or
  * partially-written records never crash the app.
@@ -75,11 +97,13 @@ export function migrateProject(raw: unknown): SavedProject | null {
     lastSpecification: isPlainObject(raw.lastSpecification)
       ? (raw.lastSpecification as unknown as SavedProject["lastSpecification"])
       : null,
-    lastResult: isPlainObject(raw.lastResult) ? (raw.lastResult as unknown as SavedProject["lastResult"]) : null,
+    lastResult: migrateResultToV3(raw.lastResult),
   };
 
   // version 1 -> 2: `form.preview` added (handled by migrateFormToV2 above,
   // which is safe to run on records that already carry it).
+  // version 2 -> 3: `lastResult.generator` added (handled by migrateResultToV3
+  // above, which is likewise safe to re-run).
   void version;
   return base;
 }

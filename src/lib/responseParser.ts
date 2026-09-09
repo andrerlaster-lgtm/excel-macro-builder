@@ -50,6 +50,9 @@ export function parseAiResponse(raw: string): ParseResult {
     testPlan: asStringArray(obj.testPlan),
     safetyCautions: asStringArray(obj.safetyCautions),
     platformLimitations: asStringArray(obj.platformLimitations),
+    // Attribution is set here, at the only place AI output becomes a result,
+    // so template code can never be presented as AI output or vice versa.
+    generator: "ai",
   };
 
   return { ok: true, result, error: null };

@@ -215,8 +215,16 @@ export interface MacroSpecification {
 }
 
 // ---------------------------------------------------------------------------
-// AI response, parsed defensively from provider output.
+// Generated macro result.
+//
+// Two generators can produce this shape: the AI provider (parsed defensively
+// from provider output) and the deterministic in-browser template builder in
+// `src/lib/vbaTemplateGenerator.ts`. Which one produced a result is recorded
+// on it so a reopened project can never misattribute template code as AI
+// output, or vice versa.
 // ---------------------------------------------------------------------------
+
+export type GeneratorKind = "ai" | "template";
 
 export interface MacroGenerationResult {
   vbaCode: string;
@@ -228,6 +236,24 @@ export interface MacroGenerationResult {
   testPlan: string[];
   safetyCautions: string[];
   platformLimitations: string[];
+  /**
+   * What the emitted code does, in order. Only the deterministic template can
+   * state this honestly, so it is absent on AI results.
+   */
+  steps?: string[];
+  /**
+   * Which generator produced this result. Optional because records saved
+   * before schema v3 predate the field; the storage migration backfills
+   * those to "ai", which is the only generator that existed then.
+   */
+  generator?: GeneratorKind;
+  /**
+   * Free-text rules the deterministic template did NOT encode. Structurally
+   * matches `UnimplementedRule` in `src/lib/vbaTemplateGenerator.ts` (inlined
+   * here to keep this module free of a dependency on the generator).
+   * Template results only.
+   */
+  unimplementedRules?: { field: string; text: string }[];
 }
 
 // ---------------------------------------------------------------------------
