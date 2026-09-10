@@ -428,6 +428,113 @@ describe("simulatePreview — lookup", () => {
     // "credit" has no source counterpart, so it must survive unchanged.
     expect(outcome.after.rows[0]).toEqual(["Cash", "100", "existing-credit", "500"]);
   });
+
+  it("produces byte-identical output to the single-source path when the second source is empty/absent", () => {
+    const withoutSecond = simulatePreview(lookupConfig());
+    const withEmptySecond = simulatePreview(
+      lookupConfig({ secondSourceSampleHeaders: [], secondSourceSampleRows: [] })
+    );
+    expect(withEmptySecond).toEqual(withoutSecond);
+  });
+});
+
+describe("simulatePreview — lookup with a second source", () => {
+  const SOURCE_HEADERS = ["Account", "debt", "credit"];
+  const SOURCE_ROWS = [
+    ["Cash", "100", "0"],
+    ["Receivables", "50", "10"],
+  ];
+  const SOURCE2_HEADERS = ["Account", "Category", "Note"];
+  const SOURCE2_ROWS = [
+    ["Cash", "bank", "primary"],
+    ["Payables", "liability", "second-only"], // no row in the primary source at all
+    ["Payables", "duplicate", "should-be-ignored"], // duplicate key within source 2
+  ];
+  const DEST_HEADERS = ["Account", "debt", "credit", "Category", "Note", "Extra"];
+
+  function twoSourceConfig(overrides: Partial<PreviewConfig> = {}): PreviewConfig {
+    return config({
+      kind: "lookup",
+      keyColumn: "Account",
+      sampleHeaders: SOURCE_HEADERS,
+      sampleRows: SOURCE_ROWS,
+      secondSourceSampleHeaders: SOURCE2_HEADERS,
+      secondSourceSampleRows: SOURCE2_ROWS,
+      destSampleHeaders: DEST_HEADERS,
+      destSampleRows: [
+        ["Cash", "", "", "", "", "keep-me"], // matched by both sources
+        ["Receivables", "", "", "", "", "keep-me"], // matched by source 1 only
+        ["Payables", "", "", "", "", "keep-me"], // matched by source 2 only
+        ["Unknown", "", "", "", "", "keep-me"], // matched by neither
+      ],
+      ...overrides,
+    });
+  }
+
+  it("fills a row matched by both sources from each source's own columns", () => {
+    const outcome = simulatePreview(twoSourceConfig());
+    const cashRow = outcome.after.rows.find((r) => r[0] === "Cash");
+    expect(cashRow).toEqual(["Cash", "100", "0", "bank", "primary", "keep-me"]);
+  });
+
+  it("fills a row matched only by the first source, leaving second-source columns blank", () => {
+    const outcome = simulatePreview(twoSourceConfig());
+    const receivablesRow = outcome.after.rows.find((r) => r[0] === "Receivables");
+    expect(receivablesRow).toEqual(["Receivables", "50", "10", "", "", "keep-me"]);
+  });
+
+  it("fills a row matched only by the second source, leaving first-source columns blank", () => {
+    const outcome = simulatePreview(twoSourceConfig());
+    const payablesRow = outcome.after.rows.find((r) => r[0] === "Payables");
+    expect(payablesRow).toEqual(["Payables", "", "", "liability", "second-only", "keep-me"]);
+  });
+
+  it("leaves a row matched by neither source completely untouched", () => {
+    const outcome = simulatePreview(twoSourceConfig());
+    const unknownRow = outcome.after.rows.find((r) => r[0] === "Unknown");
+    expect(unknownRow).toEqual(["Unknown", "", "", "", "", "keep-me"]);
+  });
+
+  it("never touches a column neither source produces", () => {
+    const outcome = simulatePreview(twoSourceConfig());
+    expect(outcome.after.rows.map((r) => r[5])).toEqual(["keep-me", "keep-me", "keep-me", "keep-me"]);
+  });
+
+  it("gives the first source priority on a genuine header collision", () => {
+    const outcome = simulatePreview(
+      twoSourceConfig({
+        secondSourceSampleHeaders: ["Account", "debt", "Category"], // "debt" collides with source 1
+        secondSourceSampleRows: [["Cash", "999999", "bank"]],
+      })
+    );
+    const cashRow = outcome.after.rows.find((r) => r[0] === "Cash");
+    // "debt" must come from the FIRST source (100), never the second (999999).
+    expect(cashRow?.[1]).toBe("100");
+    expect(cashRow?.[3]).toBe("bank"); // "Category" still fills from source 2, no collision there
+  });
+
+  it("reports a duplicate key within the second source and keeps its FIRST row", () => {
+    const outcome = simulatePreview(twoSourceConfig());
+    const payablesRow = outcome.after.rows.find((r) => r[0] === "Payables");
+    expect(payablesRow).toEqual(["Payables", "", "", "liability", "second-only", "keep-me"]);
+    expect(outcome.notes.join(" ")).toMatch(/duplicate second-source key/i);
+  });
+
+  it("reports a combined matched/unmatched breakdown across both sources", () => {
+    const outcome = simulatePreview(twoSourceConfig());
+    expect(outcome.notes.join(" ")).toMatch(/3 of 4 destination row\(s\) matched at least one source/i);
+    expect(outcome.notes.join(" ")).toMatch(/1 matched both/i);
+    expect(outcome.notes.join(" ")).toMatch(/1 matched only the first source/i);
+    expect(outcome.notes.join(" ")).toMatch(/1 matched only the second/i);
+  });
+
+  it("refuses when the key column is missing from the second source's headers", () => {
+    const outcome = simulatePreview(
+      twoSourceConfig({ secondSourceSampleHeaders: ["Acct", "Category"], secondSourceSampleRows: [["Cash", "bank"]] })
+    );
+    expect(outcome.status).toBe("error");
+    expect(outcome.message).toMatch(/second source/i);
+  });
 });
 
 describe("simulatePreview — caps", () => {

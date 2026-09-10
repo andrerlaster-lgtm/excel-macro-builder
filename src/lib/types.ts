@@ -43,6 +43,24 @@ export interface DataMapping {
   destinationWorksheet: string;
   destinationRangeOrTable: string;
 
+  /**
+   * Optional SECOND lookup source, used only by the "lookup" preview
+   * operation (see `PreviewConfig.kind`). Off by default -- when
+   * `secondSourceEnabled` is false, a lookup behaves exactly as it did
+   * before this second source existed. Mirrors the `sameWorkbook`/
+   * `destinationWorkbook` idiom above: `secondSourceSameWorkbookAsSource`
+   * defaults to true (matching the common case of both lookup sources
+   * living in the source workbook), and `secondSourceWorkbook` is only
+   * meaningful when it is false.
+   */
+  secondSourceEnabled: boolean;
+  secondSourceSameWorkbookAsSource: boolean;
+  secondSourceWorkbook: Maybe;
+  secondSourceWorksheet: string;
+  secondSourceRangeOrTable: string;
+  secondSourceHeaderRow: string;
+  secondSourceColumnHeaders: string;
+
   matchField: Maybe;
   filters: Maybe;
   transformationRules: Maybe;
@@ -103,6 +121,18 @@ export interface PreviewConfig {
    */
   destSampleHeaders: string[];
   destSampleRows: string[][];
+  /**
+   * Editable SECOND SOURCE sample grid, used only by "lookup" when
+   * `DataMapping.secondSourceEnabled` is true. Kept separate from
+   * `sampleHeaders`/`sampleRows` (the PRIMARY source) so the two never
+   * collide. `previewSimulator.ts` treats a non-empty
+   * `secondSourceSampleHeaders` as "this preview has second-source data to
+   * simulate with" -- callers that want to respect a disabled checkbox are
+   * responsible for not populating (or for clearing) these arrays, the same
+   * way `PreviewPanel` does.
+   */
+  secondSourceSampleHeaders: string[];
+  secondSourceSampleRows: string[][];
 }
 
 export function emptyPreviewConfig(): PreviewConfig {
@@ -117,6 +147,8 @@ export function emptyPreviewConfig(): PreviewConfig {
     sampleRows: [],
     destSampleHeaders: [],
     destSampleRows: [],
+    secondSourceSampleHeaders: [],
+    secondSourceSampleRows: [],
   };
 }
 
@@ -148,6 +180,13 @@ export function emptyFormData(): MacroFormData {
       destinationWorkbook: emptyMaybe(),
       destinationWorksheet: "",
       destinationRangeOrTable: "",
+      secondSourceEnabled: false,
+      secondSourceSameWorkbookAsSource: true,
+      secondSourceWorkbook: emptyMaybe(),
+      secondSourceWorksheet: "",
+      secondSourceRangeOrTable: "",
+      secondSourceHeaderRow: "",
+      secondSourceColumnHeaders: "",
       matchField: emptyMaybe(),
       filters: emptyMaybe(),
       transformationRules: emptyMaybe(),
@@ -195,6 +234,22 @@ export interface MacroSpecification {
     workbook: string | "Not applicable";
     worksheet: string;
     rangeOrTable: string;
+  };
+  /**
+   * Optional second lookup source (see `DataMapping.secondSourceEnabled`),
+   * serialized the same way `source` is. Every field is "Not applicable"
+   * when disabled, matching how `destination.workbook` is "Not applicable"
+   * for a same-workbook destination. No sample rows travel here either --
+   * those stay in the browser, same reasoning as `preview`.
+   */
+  secondSource: {
+    enabled: boolean;
+    sameWorkbookAsSource: boolean;
+    workbook: string | "Not applicable";
+    worksheet: string | "Not applicable";
+    rangeOrTable: string | "Not applicable";
+    headerRow: string | "Not applicable";
+    columnHeaders: string | "Not applicable";
   };
   rules: {
     matchField: string | "Not applicable";

@@ -157,6 +157,9 @@ export function PreviewPanel({
   const destHeaders = preview.destSampleHeaders;
   const destRows = preview.destSampleRows;
   const isLookup = preview.kind === "lookup";
+  const hasSecondSource = isLookup && mapping.secondSourceEnabled;
+  const source2Headers = preview.secondSourceSampleHeaders;
+  const source2Rows = preview.secondSourceSampleRows;
 
   // Local text buffer for the destination headers field: committing only on
   // blur (not on every keystroke) means typing "Account, " does not collapse
@@ -167,6 +170,14 @@ export function PreviewPanel({
     setDestHeaderText(destHeaders.join(", "));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [destHeaders.join(",")]);
+
+  // Same pattern as the destination headers buffer above, for the second
+  // source's grid.
+  const [source2HeaderText, setSource2HeaderText] = useState(source2Headers.join(", "));
+  useEffect(() => {
+    setSource2HeaderText(source2Headers.join(", "));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [source2Headers.join(",")]);
 
   function setCell(rowIndex: number, colIndex: number, value: string) {
     const next = rows.map((row, r) => (r === rowIndex ? row.map((c, i) => (i === colIndex ? value : c)) : [...row]));
@@ -224,6 +235,52 @@ export function PreviewPanel({
     onPreviewChange({ ...preview, destSampleHeaders: newHeaders, destSampleRows: adjustedRows });
   }
 
+  function setSource2Cell(rowIndex: number, colIndex: number, value: string) {
+    const next = source2Rows.map((row, r) =>
+      r === rowIndex ? row.map((c, i) => (i === colIndex ? value : c)) : [...row]
+    );
+    onPreviewChange({ ...preview, secondSourceSampleRows: next });
+  }
+
+  function addSource2Row() {
+    onPreviewChange({ ...preview, secondSourceSampleRows: [...source2Rows, source2Headers.map(() => "")] });
+  }
+
+  function removeSource2Row(rowIndex: number) {
+    onPreviewChange({ ...preview, secondSourceSampleRows: source2Rows.filter((_, r) => r !== rowIndex) });
+  }
+
+  /**
+   * Same free-text header idiom as the destination grid, but the second
+   * source DOES have a step 2 field for its headers (`secondSourceColumnHeaders`,
+   * unlike the destination) -- so this also offers a one-click reseed from it.
+   */
+  function setSource2HeadersText(text: string) {
+    const newHeaders = text
+      .split(",")
+      .map((h) => h.trim())
+      .filter((h) => h.length > 0);
+    const adjustedRows = source2Rows.map((row) => {
+      const cells = row.slice(0, newHeaders.length);
+      while (cells.length < newHeaders.length) cells.push("");
+      return cells;
+    });
+    onPreviewChange({ ...preview, secondSourceSampleHeaders: newHeaders, secondSourceSampleRows: adjustedRows });
+  }
+
+  function reseedSource2Headers() {
+    const newHeaders = mapping.secondSourceColumnHeaders
+      .split(",")
+      .map((h) => h.trim())
+      .filter((h) => h.length > 0);
+    const adjustedRows = source2Rows.map((row) => {
+      const cells = row.slice(0, newHeaders.length);
+      while (cells.length < newHeaders.length) cells.push("");
+      return cells;
+    });
+    onPreviewChange({ ...preview, secondSourceSampleHeaders: newHeaders, secondSourceSampleRows: adjustedRows });
+  }
+
   return (
     <section className="card" aria-labelledby="preview-heading">
       <h2 className="card-title" id="preview-heading">
@@ -233,9 +290,14 @@ export function PreviewPanel({
       <div className="callout callout--amber" role="note">
         <span className="callout-title">What this preview is, and is not</span>
         This simulates the operation you picked in step 2, applied to the sample rows below
-        {isLookup ? " (including the destination sample rows you type in below)" : ""}. It does{" "}
-        <strong>not</strong> run the generated VBA and cannot prove the real macro behaves this way — the macro can do
-        something different. Read the generated code and test it on a copy of your workbook before trusting it.
+        {isLookup
+          ? hasSecondSource
+            ? " (including the destination and second-source sample rows you type in below)"
+            : " (including the destination sample rows you type in below)"
+          : ""}
+        . It does <strong>not</strong> run the generated VBA and cannot prove the real macro behaves this way — the
+        macro can do something different. Read the generated code and test it on a copy of your workbook before
+        trusting it.
       </div>
 
       <h3 className="section-heading">{isLookup ? "Source sample rows" : "Sample rows"}</h3>
@@ -293,6 +355,48 @@ export function PreviewPanel({
             onSetCell={setDestCell}
             onAddRow={addDestRow}
             onRemoveRow={removeDestRow}
+          />
+        </>
+      )}
+
+      {hasSecondSource && (
+        <>
+          <h3 className="section-heading">Second source sample rows</h3>
+          <p className="card-subtitle">
+            Matched against the destination by the same key as the source sample above. Include a row whose key does
+            not appear in the source sample, to see a row matched only by the second source.
+          </p>
+
+          <FieldWrapper
+            label="Second source column headers"
+            htmlFor="source2-sample-headers-input"
+            hint="Comma-separated, e.g. Account, Category, Note."
+          >
+            <input
+              type="text"
+              id="source2-sample-headers-input"
+              placeholder="e.g. Account, Category, Note"
+              value={source2HeaderText}
+              onChange={(e) => setSource2HeaderText(e.target.value)}
+              onBlur={(e) => setSource2HeadersText(e.target.value)}
+            />
+          </FieldWrapper>
+
+          <div className="btn-row">
+            <button type="button" className="btn" onClick={reseedSource2Headers}>
+              Reseed headers from step 2
+            </button>
+          </div>
+
+          <EditableSampleGrid
+            idPrefix="source2-sample"
+            caption="Editable second-source sample rows used to compute the lookup preview"
+            emptyMessage="No second-source sample columns yet. Set the column headers above to start."
+            headers={source2Headers}
+            rows={source2Rows}
+            onSetCell={setSource2Cell}
+            onAddRow={addSource2Row}
+            onRemoveRow={removeSource2Row}
           />
         </>
       )}

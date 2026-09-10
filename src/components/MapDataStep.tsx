@@ -331,10 +331,89 @@ export function MapDataStep({
       </fieldset>
 
       {preview.kind === "lookup" && (
-        <p className="field-hint" style={{ marginTop: -8, marginBottom: 16 }}>
-          Fills in EXISTING destination rows by matching a key — unlike the other operations, it never clears,
-          rebuilds, or adds rows; a destination row with no matching key is left exactly as it was.
-        </p>
+        <>
+          <p className="field-hint" style={{ marginTop: -8, marginBottom: 16 }}>
+            Fills in EXISTING destination rows by matching a key — unlike the other operations, it never clears,
+            rebuilds, or adds rows; a destination row with no matching key is left exactly as it was.
+          </p>
+
+          <label className="radio-option" style={{ marginBottom: 12 }}>
+            <input
+              type="checkbox"
+              checked={mapping.secondSourceEnabled}
+              onChange={(e) => onMappingChange({ ...mapping, secondSourceEnabled: e.target.checked })}
+            />
+            Also look up values from a second source
+          </label>
+
+          {mapping.secondSourceEnabled && (
+            <>
+              <p className="field-hint" style={{ marginTop: -8, marginBottom: 16 }}>
+                Matched by the same key column above. If a destination column has a same-named column in both
+                sources, the first source wins — the second source&apos;s value for that column is never used.
+              </p>
+
+              <label className="radio-option" style={{ marginBottom: 12 }}>
+                <input
+                  type="checkbox"
+                  checked={mapping.secondSourceSameWorkbookAsSource}
+                  onChange={(e) =>
+                    onMappingChange({ ...mapping, secondSourceSameWorkbookAsSource: e.target.checked })
+                  }
+                />
+                Same workbook as the primary source
+              </label>
+
+              {!mapping.secondSourceSameWorkbookAsSource && (
+                <MaybeField
+                  id="secondSourceWorkbook"
+                  label="Second source workbook file name/path"
+                  value={mapping.secondSourceWorkbook}
+                  onChange={(v) => onMappingChange({ ...mapping, secondSourceWorkbook: v })}
+                  placeholder="e.g. Sample_Master.xlsx"
+                  multiline={false}
+                  error={errFor(errors, "mapping.secondSourceWorkbook")}
+                />
+              )}
+
+              <div className="field-row">
+                <TextField
+                  id="secondSourceWorksheet"
+                  label="Second source worksheet"
+                  value={mapping.secondSourceWorksheet}
+                  onChange={(v) => onMappingChange({ ...mapping, secondSourceWorksheet: v })}
+                  placeholder="e.g. Master"
+                  error={errFor(errors, "mapping.secondSourceWorksheet")}
+                />
+                <TextField
+                  id="secondSourceRangeOrTable"
+                  label="Second source range or table"
+                  value={mapping.secondSourceRangeOrTable}
+                  onChange={(v) => onMappingChange({ ...mapping, secondSourceRangeOrTable: v })}
+                  placeholder="e.g. A1:C50 or tblMaster"
+                  error={errFor(errors, "mapping.secondSourceRangeOrTable")}
+                />
+              </div>
+              <TextField
+                id="secondSourceHeaderRow"
+                label="Second source header row"
+                value={mapping.secondSourceHeaderRow}
+                onChange={(v) => onMappingChange({ ...mapping, secondSourceHeaderRow: v })}
+                placeholder="e.g. Row 1"
+                error={errFor(errors, "mapping.secondSourceHeaderRow")}
+              />
+              <TextField
+                id="secondSourceColumnHeaders"
+                label="Second source column headers"
+                value={mapping.secondSourceColumnHeaders}
+                onChange={(v) => onMappingChange({ ...mapping, secondSourceColumnHeaders: v })}
+                placeholder="e.g. Account, Category, Note"
+                multiline
+                error={errFor(errors, "mapping.secondSourceColumnHeaders")}
+              />
+            </>
+          )}
+        </>
       )}
 
       {(preview.kind === "filter" ||

@@ -672,6 +672,146 @@ describe("generateVbaFromTemplate — lookup", () => {
   });
 });
 
+function lookupFormWithSecondSource(): MacroFormData {
+  const form = lookupForm();
+  form.mapping.secondSourceEnabled = true;
+  form.mapping.secondSourceSameWorkbookAsSource = true;
+  form.mapping.secondSourceWorksheet = "Master";
+  form.mapping.secondSourceRangeOrTable = "A1:B10";
+  form.mapping.secondSourceHeaderRow = "Row 1";
+  form.mapping.secondSourceColumnHeaders = "Account Name, Region";
+  return form;
+}
+
+describe("generateVbaFromTemplate — lookup with a second source", () => {
+  it("regression: emits BYTE-IDENTICAL code to the single-source path when the second source is disabled", () => {
+    const withoutFlag = generateVbaFromTemplate(lookupForm());
+    const explicitlyDisabled = lookupForm();
+    explicitlyDisabled.mapping.secondSourceEnabled = false;
+    const withFlagOff = generateVbaFromTemplate(explicitlyDisabled);
+    expect(withFlagOff.vbaCode).toBe(withoutFlag.vbaCode);
+    expect(withFlagOff.vbaCode).not.toContain("SECOND_SOURCE");
+    expect(withFlagOff.vbaCode).not.toContain("source2");
+  });
+
+  it("emits two source-read blocks when enabled, reusing sourceBook rather than opening it twice for the same-workbook case", () => {
+    const { vbaCode, status } = generateVbaFromTemplate(lookupFormWithSecondSource());
+    expect(status).toBe("ok");
+    expect(vbaCode).toContain("Set sourceBook = FindOpenWorkbook(SOURCE_WORKBOOK_NAME)");
+    expect(vbaCode).toContain("Set source2Book = sourceBook");
+    expect(vbaCode).not.toContain("Set source2Book = FindOpenWorkbook(SECOND_SOURCE_WORKBOOK_NAME)");
+    expect(vbaCode).toContain("Set source2Sheet = FindWorksheet(source2Book, SECOND_SOURCE_SHEET_NAME)");
+    expect(vbaCode).toContain("Set source2Range = ResolveDataRange(source2Sheet, SECOND_SOURCE_RANGE_OR_TABLE)");
+    expect(vbaCode).toContain("source2KeyColumn = ColumnIndexByHeader(source2HeaderRow, KEY_HEADER)");
+  });
+
+  it("opens the second source's own workbook by name when it is NOT the same workbook as the primary source", () => {
+    const form = lookupFormWithSecondSource();
+    form.mapping.secondSourceSameWorkbookAsSource = false;
+    form.mapping.secondSourceWorkbook = { notApplicable: false, value: "Sample_Master.xlsx" };
+    const { vbaCode } = generateVbaFromTemplate(form);
+    expect(vbaCode).toContain('Private Const SECOND_SOURCE_WORKBOOK_NAME As String = "Sample_Master.xlsx"');
+    expect(vbaCode).toContain("Set source2Book = FindOpenWorkbook(SECOND_SOURCE_WORKBOOK_NAME)");
+    expect(vbaCode).not.toContain("Set source2Book = sourceBook");
+    // Still declared and reset even in this branch (Option Explicit requires it either way).
+    expect(vbaCode).toContain("Dim source2Book As Workbook");
+    expect(vbaCode).toContain("Set source2Book = Nothing");
+  });
+
+  it("structurally skips a destination column the first source's map already claims, enforcing 'first source wins' by construction", () => {
+    const { vbaCode } = generateVbaFromTemplate(lookupFormWithSecondSource());
+    expect(vbaCode).toContain("ReDim firstClaimedColumn(1 To destRange.Columns.Count)");
+    expect(vbaCode).toContain("If destColumnMap(c) <> 0 Then firstClaimedColumn(destColumnMap(c)) = True");
+    expect(vbaCode).toContain(
+      "If destColumnMap2(c) <> 0 And firstClaimedColumn(destColumnMap2(c)) Then destColumnMap2(c) = 0"
+    );
+  });
+
+  it("matches a destination row against BOTH sources independently and reports a three-way breakdown", () => {
+    const { vbaCode } = generateVbaFromTemplate(lookupFormWithSecondSource());
+    expect(vbaCode).toContain(
+      "foundFirst = (Len(rawKey) > 0 And CollectionHasKey(sourceIndex, normalizedKey))"
+    );
+    expect(vbaCode).toContain(
+      "foundSecond = (Len(rawKey) > 0 And CollectionHasKey(source2Index, normalizedKey))"
+    );
+    expect(vbaCode).toContain('"Matched both sources: " & matchedBoth & vbCrLf & _');
+    expect(vbaCode).toContain('"Matched only the first source: " & matchedFirstOnly & vbCrLf & _');
+    expect(vbaCode).toContain('"Matched only the second source: " & matchedSecondOnly & vbCrLf & _');
+    expect(vbaCode).toContain('"No match in either source, left unchanged: " & unmatchedCount & _');
+  });
+
+  it("never emits ClearContents or ListRows.Add with a second source enabled either", () => {
+    const { vbaCode } = generateVbaFromTemplate(lookupFormWithSecondSource());
+    expect(vbaCode).not.toContain("ClearContents");
+    expect(vbaCode).not.toContain("ListRows.Add");
+  });
+
+  it("standard VBA quality invariants hold with a second source too", () => {
+    const { vbaCode } = generateVbaFromTemplate(lookupFormWithSecondSource());
+    expect(vbaCode.startsWith("Option Explicit\n")).toBe(true);
+    expectNoForbiddenIdioms(vbaCode);
+    for (const setting of ["ScreenUpdating", "EnableEvents", "DisplayAlerts", "Calculation"]) {
+      expect(vbaCode).toContain(`prev${setting} = Application.${setting}`);
+      expect(vbaCode).toContain(`Application.${setting} = prev${setting}`);
+    }
+  });
+
+  it("feeds two-source lookup output through the safety scanner with real (unweakened) results", () => {
+    const { vbaCode } = generateVbaFromTemplate(lookupFormWithSecondSource());
+    expect(scanVbaForWarnings(vbaCode)).toEqual([]);
+  });
+
+  it("refuses (status unsupported) when the second source's worksheet, range, or column headers are missing", () => {
+    const missingSheet = lookupFormWithSecondSource();
+    missingSheet.mapping.secondSourceWorksheet = "";
+    expect(generateVbaFromTemplate(missingSheet).status).toBe("unsupported");
+    expect(generateVbaFromTemplate(missingSheet).message).toMatch(/second lookup source is enabled/i);
+
+    const missingHeaders = lookupFormWithSecondSource();
+    missingHeaders.mapping.secondSourceColumnHeaders = "";
+    expect(generateVbaFromTemplate(missingHeaders).status).toBe("unsupported");
+  });
+
+  it("refuses when a different-workbook second source has no workbook filled in", () => {
+    const form = lookupFormWithSecondSource();
+    form.mapping.secondSourceSameWorkbookAsSource = false;
+    // secondSourceWorkbook left at its default (empty/notApplicable).
+    const result = generateVbaFromTemplate(form);
+    expect(result.status).toBe("unsupported");
+    expect(result.message).toMatch(/second lookup source is set to a different workbook/i);
+  });
+
+  it("refuses when the key column is missing from the second source's headers", () => {
+    const form = lookupFormWithSecondSource();
+    form.mapping.secondSourceColumnHeaders = "Region, Category"; // no "Account Name"
+    const result = generateVbaFromTemplate(form);
+    expect(result.status).toBe("unsupported");
+    expect(result.message).toMatch(/must also be one of the second lookup source's column headers/i);
+  });
+
+  it("does not require the second source's fields to be filled in when it is disabled", () => {
+    const form = lookupForm();
+    form.mapping.secondSourceEnabled = false;
+    form.mapping.secondSourceWorksheet = "";
+    form.mapping.secondSourceRangeOrTable = "";
+    form.mapping.secondSourceColumnHeaders = "";
+    expect(generateVbaFromTemplate(form).status).toBe("ok");
+  });
+
+  it("ignores a second source enabled outside a lookup operation (defensive: the UI should never allow this)", () => {
+    const form = baseForm(); // kind stays "aggregate" from baseForm()
+    form.mapping.secondSourceEnabled = true;
+    form.mapping.secondSourceWorksheet = "Master";
+    form.mapping.secondSourceRangeOrTable = "A1:B10";
+    form.mapping.secondSourceColumnHeaders = "Account Name, Region";
+    const result = generateVbaFromTemplate(form);
+    expect(result.status).toBe("ok");
+    expect(result.vbaCode).not.toContain("SECOND_SOURCE");
+    expect(result.vbaCode).not.toContain("source2");
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Shared fixture: lookup's declared semantics vs previewSimulator's
 // simulateLookup. The VBA cannot be executed here, so this pins the two
@@ -716,6 +856,60 @@ describe("lookup template semantics agree with previewSimulator", () => {
     expect(template.vbaCode).toContain("unmatchedCount = unmatchedCount + 1");
     // No row-creation idiom anywhere near the lookup write path.
     expect(template.vbaCode).not.toContain("ListRows.Add");
+  });
+});
+
+describe("two-source lookup template semantics agree with previewSimulator", () => {
+  it("both give the first source priority on a genuine header collision", () => {
+    const form = lookupFormWithSecondSource();
+    form.preview.sampleHeaders = ["Account Name", "Amount"];
+    form.preview.sampleRows = [["Cash - Operating", "100"]];
+    form.preview.secondSourceSampleHeaders = ["Account Name", "Amount"]; // collides on "Amount"
+    form.preview.secondSourceSampleRows = [["Cash - Operating", "999999"]];
+    form.preview.destSampleHeaders = ["Account Name", "Amount"];
+    form.preview.destSampleRows = [["Cash - Operating", ""]];
+
+    const preview = simulatePreview(form.preview);
+    expect(preview.status).toBe("ok");
+    // "Amount" must come from the FIRST source (100), never the second (999999).
+    expect(preview.after.rows[0]).toEqual(["Cash - Operating", "100"]);
+
+    const template = generateVbaFromTemplate(form);
+    expect(template.status).toBe("ok");
+    expect(template.vbaCode).toContain(
+      "If destColumnMap2(c) <> 0 And firstClaimedColumn(destColumnMap2(c)) Then destColumnMap2(c) = 0"
+    );
+  });
+
+  it("both match a row via either source independently and leave a row matched by neither untouched", () => {
+    const form = lookupFormWithSecondSource();
+    form.preview.sampleHeaders = ["Account Name", "Amount"];
+    form.preview.sampleRows = [["Cash - Operating", "100"]];
+    form.preview.secondSourceSampleHeaders = ["Account Name", "Region"];
+    form.preview.secondSourceSampleRows = [["Accounts Receivable", "East"]];
+    form.preview.destSampleHeaders = ["Account Name", "Amount", "Region", "Extra"];
+    form.preview.destSampleRows = [
+      ["Cash - Operating", "", "", "keep-1"], // first source only
+      ["Accounts Receivable", "", "", "keep-2"], // second source only
+      ["Prepaid Insurance", "", "", "keep-3"], // neither
+    ];
+
+    const preview = simulatePreview(form.preview);
+    expect(preview.status).toBe("ok");
+    expect(preview.after.rows).toEqual([
+      ["Cash - Operating", "100", "", "keep-1"],
+      ["Accounts Receivable", "", "East", "keep-2"],
+      ["Prepaid Insurance", "", "", "keep-3"],
+    ]);
+    expect(preview.notes.join(" ")).toMatch(/1 matched only the first source/i);
+    expect(preview.notes.join(" ")).toMatch(/1 matched only the second/i);
+
+    const template = generateVbaFromTemplate(form);
+    expect(template.status).toBe("ok");
+    // Both source checks are independent -- an unmatched-by-both row is the
+    // only case that increments unmatchedCount.
+    expect(template.vbaCode).toContain("If Not foundFirst And Not foundSecond Then");
+    expect(template.vbaCode).toContain("unmatchedCount = unmatchedCount + 1");
   });
 });
 

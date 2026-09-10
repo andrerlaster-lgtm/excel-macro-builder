@@ -104,6 +104,8 @@ describe("buildSpecification — preview section", () => {
       sampleRows: [["East", "100"]],
       destSampleHeaders: [],
       destSampleRows: [],
+      secondSourceSampleHeaders: [],
+      secondSourceSampleRows: [],
     };
     const spec = buildSpecification(form, fixedNow);
     expect(spec.preview.kind).toBe("aggregate");

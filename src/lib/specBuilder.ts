@@ -1,4 +1,4 @@
-import { MacroFormData, MacroSpecification, Maybe, PreviewConfig } from "./types";
+import { DataMapping, MacroFormData, MacroSpecification, Maybe, PreviewConfig } from "./types";
 
 const NOT_APPLICABLE = "Not applicable" as const;
 
@@ -49,6 +49,34 @@ function previewSection(preview: PreviewConfig | undefined): MacroSpecification[
 }
 
 /**
+ * Projects the optional second lookup source into the specification, the
+ * same way `destination.workbook` handles a same-workbook destination:
+ * every field is "Not applicable" when the second source is disabled.
+ */
+function secondSourceSection(mapping: DataMapping): MacroSpecification["secondSource"] {
+  if (!mapping.secondSourceEnabled) {
+    return {
+      enabled: false,
+      sameWorkbookAsSource: mapping.secondSourceSameWorkbookAsSource,
+      workbook: NOT_APPLICABLE,
+      worksheet: NOT_APPLICABLE,
+      rangeOrTable: NOT_APPLICABLE,
+      headerRow: NOT_APPLICABLE,
+      columnHeaders: NOT_APPLICABLE,
+    };
+  }
+  return {
+    enabled: true,
+    sameWorkbookAsSource: mapping.secondSourceSameWorkbookAsSource,
+    workbook: mapping.secondSourceSameWorkbookAsSource ? NOT_APPLICABLE : fromMaybe(mapping.secondSourceWorkbook),
+    worksheet: fromText(mapping.secondSourceWorksheet),
+    rangeOrTable: fromText(mapping.secondSourceRangeOrTable),
+    headerRow: fromText(mapping.secondSourceHeaderRow),
+    columnHeaders: fromText(mapping.secondSourceColumnHeaders),
+  };
+}
+
+/**
  * Deterministically builds a structured specification object from the form.
  * No AI, no free-text paragraph -- this is what gets sent to the prompt
  * builder, and it is also downloadable/copyable as-is when no API key is
@@ -80,6 +108,7 @@ export function buildSpecification(form: MacroFormData, now: () => string = () =
       worksheet: form.mapping.destinationWorksheet.trim(),
       rangeOrTable: form.mapping.destinationRangeOrTable.trim(),
     },
+    secondSource: secondSourceSection(form.mapping),
     rules: {
       matchField: fromMaybe(form.mapping.matchField),
       filters: fromMaybe(form.mapping.filters),

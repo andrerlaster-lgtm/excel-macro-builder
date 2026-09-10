@@ -1,8 +1,11 @@
 import {
+  DataMapping,
   emptyFormData,
+  emptyMaybe,
   emptyPreviewConfig,
   MacroFormData,
   MacroGenerationResult,
+  Maybe,
   PreviewConfig,
   SavedProject,
 } from "./types";
@@ -12,7 +15,7 @@ import {
 // archiving is the only removal path; use browser site-data controls to
 // actually clear storage (documented in the README).
 
-export const CURRENT_SCHEMA_VERSION = 4;
+export const CURRENT_SCHEMA_VERSION = 5;
 export const STORAGE_KEY = "excel-macro-builder:projects:v1";
 
 interface StorageEnvelope {
@@ -63,8 +66,56 @@ function migrateFormToV2(form: MacroFormData): MacroFormData {
     destSampleRows: Array.isArray(raw.destSampleRows)
       ? raw.destSampleRows.map((row) => (Array.isArray(row) ? row.map((c) => String(c ?? "")) : []))
       : [],
+    // v4 -> v5: `secondSourceSampleHeaders`/`secondSourceSampleRows` added for
+    // the optional second lookup source. Backfilled to empty arrays, which is
+    // exactly what an older draft's disabled second source should read as.
+    secondSourceSampleHeaders: Array.isArray(raw.secondSourceSampleHeaders)
+      ? raw.secondSourceSampleHeaders.map((h) => String(h ?? ""))
+      : [],
+    secondSourceSampleRows: Array.isArray(raw.secondSourceSampleRows)
+      ? raw.secondSourceSampleRows.map((row) => (Array.isArray(row) ? row.map((c) => String(c ?? "")) : []))
+      : [],
   };
   return { ...form, preview };
+}
+
+function readMaybe(raw: unknown, fallback: Maybe): Maybe {
+  if (!isPlainObject(raw)) return fallback;
+  return {
+    notApplicable: typeof raw.notApplicable === "boolean" ? raw.notApplicable : fallback.notApplicable,
+    value: typeof raw.value === "string" ? raw.value : fallback.value,
+  };
+}
+
+/**
+ * v4 -> v5: `mapping.secondSource*` fields added for the optional second
+ * lookup source. Backfilled disabled/empty on any older draft that lacks
+ * them, so a pre-existing single-source lookup draft keeps behaving exactly
+ * as it did before this feature existed.
+ */
+function migrateMappingToV5(mapping: unknown): DataMapping {
+  const defaults = emptyFormData().mapping;
+  if (!isPlainObject(mapping)) return defaults;
+  const raw = mapping as Record<string, unknown>;
+  return {
+    ...(mapping as unknown as DataMapping),
+    secondSourceEnabled: typeof raw.secondSourceEnabled === "boolean" ? raw.secondSourceEnabled : false,
+    secondSourceSameWorkbookAsSource:
+      typeof raw.secondSourceSameWorkbookAsSource === "boolean" ? raw.secondSourceSameWorkbookAsSource : true,
+    secondSourceWorkbook: readMaybe(raw.secondSourceWorkbook, emptyMaybe()),
+    secondSourceWorksheet: typeof raw.secondSourceWorksheet === "string" ? raw.secondSourceWorksheet : "",
+    secondSourceRangeOrTable: typeof raw.secondSourceRangeOrTable === "string" ? raw.secondSourceRangeOrTable : "",
+    secondSourceHeaderRow: typeof raw.secondSourceHeaderRow === "string" ? raw.secondSourceHeaderRow : "",
+    secondSourceColumnHeaders: typeof raw.secondSourceColumnHeaders === "string" ? raw.secondSourceColumnHeaders : "",
+  };
+}
+
+/** Applies `migrateMappingToV5` to whatever `.mapping` a raw form object carries. */
+function migrateMappingInForm(rawForm: Record<string, unknown>): MacroFormData {
+  return {
+    ...(rawForm as unknown as MacroFormData),
+    mapping: migrateMappingToV5(rawForm.mapping),
+  };
 }
 
 /**
@@ -100,7 +151,9 @@ export function migrateProject(raw: unknown): SavedProject | null {
     createdAt: typeof raw.createdAt === "string" ? raw.createdAt : new Date().toISOString(),
     updatedAt: typeof raw.updatedAt === "string" ? raw.updatedAt : new Date().toISOString(),
     archived: typeof raw.archived === "boolean" ? raw.archived : false,
-    form: migrateFormToV2(isPlainObject(raw.form) ? (raw.form as unknown as MacroFormData) : emptyFormData()),
+    form: migrateFormToV2(
+      migrateMappingInForm(isPlainObject(raw.form) ? raw.form : (emptyFormData() as unknown as Record<string, unknown>))
+    ),
     lastSpecification: isPlainObject(raw.lastSpecification)
       ? (raw.lastSpecification as unknown as SavedProject["lastSpecification"])
       : null,
@@ -114,6 +167,10 @@ export function migrateProject(raw: unknown): SavedProject | null {
   // version 3 -> 4: `form.preview.destSampleHeaders`/`destSampleRows` added
   // for the "lookup" preview kind (handled by migrateFormToV2 above, which
   // backfills them to empty arrays and is likewise safe to re-run).
+  // version 4 -> 5: `form.mapping.secondSource*` and
+  // `form.preview.secondSourceSample*` added for the optional second lookup
+  // source (handled by migrateMappingInForm/migrateMappingToV5 and
+  // migrateFormToV2 above respectively, both safe to re-run).
   void version;
   return base;
 }

@@ -210,6 +210,21 @@ function simulateLookup(config: PreviewConfig): PreviewOutcome {
   });
   if (sourceRows.length > MAX_PREVIEW_ROWS) sourceRows = sourceRows.slice(0, MAX_PREVIEW_ROWS);
 
+  // The second source is entirely optional. Its presence is signalled by a
+  // non-empty header list -- when absent, every branch below behaves exactly
+  // as it did before the second source existed (this is asserted by a
+  // regression test in previewSimulator.test.ts).
+  let source2Headers = (config.secondSourceSampleHeaders ?? []).map((h) => (h ?? "").trim());
+  if (source2Headers.length > MAX_PREVIEW_COLUMNS) source2Headers = source2Headers.slice(0, MAX_PREVIEW_COLUMNS);
+  const hasSecondSource = source2Headers.length > 0;
+
+  let source2Rows = (config.secondSourceSampleRows ?? []).map((row) => {
+    const cells = (row ?? []).slice(0, source2Headers.length).map((c) => c ?? "");
+    while (cells.length < source2Headers.length) cells.push("");
+    return cells;
+  });
+  if (source2Rows.length > MAX_PREVIEW_ROWS) source2Rows = source2Rows.slice(0, MAX_PREVIEW_ROWS);
+
   let destHeaders = (config.destSampleHeaders ?? []).map((h) => (h ?? "").trim());
   if (destHeaders.length > MAX_PREVIEW_COLUMNS) destHeaders = destHeaders.slice(0, MAX_PREVIEW_COLUMNS);
 
@@ -250,6 +265,12 @@ function simulateLookup(config: PreviewConfig): PreviewOutcome {
     return sourceHeaders.findIndex((h) => h.toLowerCase() === target);
   }
 
+  function source2ColumnIndex(name: string): number {
+    const target = (name ?? "").trim().toLowerCase();
+    if (target.length === 0) return -1;
+    return source2Headers.findIndex((h) => h.toLowerCase() === target);
+  }
+
   function destColumnIndex(name: string): number {
     const target = (name ?? "").trim().toLowerCase();
     if (target.length === 0) return -1;
@@ -268,6 +289,18 @@ function simulateLookup(config: PreviewConfig): PreviewOutcome {
       ...emptyOutcome(
         "error",
         `Key column "${keyName || "(not set)"}" must be one of both the source and destination sample columns. It is missing from ${missingFrom.join(" and ")}.`,
+        before
+      ),
+      notes,
+    };
+  }
+
+  const src2KeyIndex = hasSecondSource ? source2ColumnIndex(keyName) : -1;
+  if (hasSecondSource && src2KeyIndex === -1) {
+    return {
+      ...emptyOutcome(
+        "error",
+        `Key column "${keyName}" must also be one of the second source's sample columns (${source2Headers.join(", ") || "none"}).`,
         before
       ),
       notes,
@@ -293,6 +326,26 @@ function simulateLookup(config: PreviewConfig): PreviewOutcome {
     );
   }
 
+  // The second source's own lookup map, built the same way, independently.
+  const source2ByKey = new Map<string, string[]>();
+  let duplicateSource2Keys = 0;
+  if (hasSecondSource) {
+    for (const row of source2Rows) {
+      const key = (row[src2KeyIndex] ?? "").trim().toLowerCase();
+      if (key.length === 0) continue;
+      if (source2ByKey.has(key)) {
+        duplicateSource2Keys += 1;
+        continue;
+      }
+      source2ByKey.set(key, row);
+    }
+    if (duplicateSource2Keys > 0) {
+      notes.push(
+        `${duplicateSource2Keys} duplicate second-source key value(s) were seen again after their first row; the FIRST matching row wins for each.`
+      );
+    }
+  }
+
   // Every destination column (other than the key) that shares a heading with
   // a source column gets filled from that source row on a match. A heading
   // present on only one side is simply never touched.
@@ -303,23 +356,55 @@ function simulateLookup(config: PreviewConfig): PreviewOutcome {
     if (si !== -1) columnPairs.push({ destIndex: di, header: destHeaders[di] });
   }
 
-  let matched = 0;
+  // The second source can only fill a destination column the PRIMARY source
+  // does not already claim -- this is how "the primary source wins on a
+  // genuine header collision" is enforced structurally, not by hoping the
+  // fill order works out. See the identical convention in the lookup section
+  // of vbaTemplateGenerator.ts.
+  const claimedByFirst = new Set(columnPairs.map((p) => p.destIndex));
+  const columnPairs2: { destIndex: number; header: string }[] = [];
+  if (hasSecondSource) {
+    for (let di = 0; di < destHeaders.length; di++) {
+      if (di === destKeyIndex || claimedByFirst.has(di)) continue;
+      const si = source2ColumnIndex(destHeaders[di]);
+      if (si !== -1) columnPairs2.push({ destIndex: di, header: destHeaders[di] });
+    }
+  }
+
+  let matchedFirstOnly = 0;
+  let matchedSecondOnly = 0;
+  let matchedBoth = 0;
   let unmatched = 0;
   const afterRows: string[][] = destRows.map((row) => {
     const key = (row[destKeyIndex] ?? "").trim().toLowerCase();
     const sourceRow = key.length > 0 ? sourceByKey.get(key) : undefined;
-    if (!sourceRow) {
+    const source2Row = hasSecondSource && key.length > 0 ? source2ByKey.get(key) : undefined;
+
+    if (!sourceRow && !source2Row) {
       unmatched += 1;
       return [...row];
     }
-    matched += 1;
+    if (sourceRow && source2Row) matchedBoth += 1;
+    else if (sourceRow) matchedFirstOnly += 1;
+    else matchedSecondOnly += 1;
+
     const updated = [...row];
-    for (const pair of columnPairs) {
-      const si = sourceColumnIndex(pair.header);
-      updated[pair.destIndex] = sourceRow[si];
+    if (sourceRow) {
+      for (const pair of columnPairs) {
+        const si = sourceColumnIndex(pair.header);
+        updated[pair.destIndex] = sourceRow[si];
+      }
+    }
+    if (source2Row) {
+      for (const pair of columnPairs2) {
+        const si = source2ColumnIndex(pair.header);
+        updated[pair.destIndex] = source2Row[si];
+      }
     }
     return updated;
   });
+
+  const matched = matchedFirstOnly + matchedSecondOnly + matchedBoth;
 
   const steps: string[] = [];
   steps.push(`Match each row in the destination sample by "${keyName}" against the source sample.`);
@@ -330,9 +415,30 @@ function simulateLookup(config: PreviewConfig): PreviewOutcome {
       "No destination column (other than the key) shares a heading with a source column, so a match would not fill in anything."
     );
   }
-  steps.push("Rows with no match in the source are left unchanged.");
+  if (hasSecondSource) {
+    steps.push(`Also match each destination row by "${keyName}" against the second source sample.`);
+    if (columnPairs2.length > 0) {
+      steps.push(
+        `For a match, fill in ${columnPairs2.map((p) => `"${p.header}"`).join(", ")} from the second source row.`
+      );
+    } else {
+      steps.push(
+        "No remaining destination column shares a heading with a second-source column, so its match would not fill in anything."
+      );
+    }
+    steps.push(
+      "If a destination column has a same-named column in both sources, the FIRST source wins and the second source's value for that column is never used."
+    );
+  }
+  steps.push(hasSecondSource ? "Rows with no match in either source are left unchanged." : "Rows with no match in the source are left unchanged.");
 
-  notes.push(`${matched} of ${destRows.length} destination row(s) matched a source row; ${unmatched} were left unchanged.`);
+  if (hasSecondSource) {
+    notes.push(
+      `${matched} of ${destRows.length} destination row(s) matched at least one source (${matchedBoth} matched both, ${matchedFirstOnly} matched only the first source, ${matchedSecondOnly} matched only the second); ${unmatched} were left unchanged.`
+    );
+  } else {
+    notes.push(`${matched} of ${destRows.length} destination row(s) matched a source row; ${unmatched} were left unchanged.`);
+  }
 
   return {
     status: "ok",

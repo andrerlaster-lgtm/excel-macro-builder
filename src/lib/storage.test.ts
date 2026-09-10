@@ -213,6 +213,73 @@ describe("storage", () => {
     expect(simulatePreview(migrated!.form.preview).status).toBe("ok");
   });
 
+  it("migrates a v4 record forward to v5 by backfilling the second lookup source as disabled/empty", () => {
+    const v4Mapping = {
+      sourceWorkbook: "Sample_A.xlsx",
+      sourceWorksheet: "Sheet1",
+      sourceRangeOrTable: "A1:C10",
+      sourceHeaderRow: "Row 1",
+      sourceColumnHeaders: "Account, Amount",
+      sourceExampleRows: { notApplicable: true, value: "" },
+      sameWorkbook: true,
+      destinationWorkbook: { notApplicable: true, value: "" },
+      destinationWorksheet: "Report",
+      destinationRangeOrTable: "tblReport",
+      matchField: { notApplicable: true, value: "" },
+      filters: { notApplicable: true, value: "" },
+      transformationRules: { notApplicable: true, value: "" },
+      sortOrder: { notApplicable: true, value: "" },
+      duplicateHandling: { notApplicable: true, value: "" },
+      blankOrErrorHandling: { notApplicable: true, value: "" },
+      appendOrOverwrite: "not-applicable",
+      // note: no secondSource* fields -- they did not exist at v4
+    };
+    const v4Preview = {
+      kind: "lookup",
+      keyColumn: "Account",
+      valueColumn: "",
+      aggregate: "sum",
+      filterOperator: "equals",
+      filterValue: "",
+      sampleHeaders: ["Account", "Amount"],
+      sampleRows: [["Cash", "100"]],
+      destSampleHeaders: ["Account", "Amount"],
+      destSampleRows: [["Cash", ""]],
+      // note: no secondSourceSample* fields -- they did not exist at v4
+    };
+    const migrated = migrateProject({
+      id: "v4-project",
+      schemaVersion: 4,
+      title: "Pre-second-source Draft",
+      createdAt: "2026-06-01T00:00:00.000Z",
+      updatedAt: "2026-06-01T00:00:00.000Z",
+      archived: false,
+      form: { task: emptyFormData().task, run: emptyFormData().run, mapping: v4Mapping, preview: v4Preview },
+      lastSpecification: null,
+      lastResult: null,
+    });
+
+    expect(migrated).not.toBeNull();
+    expect(migrated?.schemaVersion).toBe(CURRENT_SCHEMA_VERSION);
+    expect(migrated?.title).toBe("Pre-second-source Draft");
+    // Second source backfilled disabled/empty -- a pre-existing single-source
+    // lookup draft must keep behaving exactly as it did before this feature.
+    expect(migrated?.form.mapping.secondSourceEnabled).toBe(false);
+    expect(migrated?.form.mapping.secondSourceSameWorkbookAsSource).toBe(true);
+    expect(migrated?.form.mapping.secondSourceWorksheet).toBe("");
+    expect(migrated?.form.mapping.secondSourceRangeOrTable).toBe("");
+    expect(migrated?.form.mapping.secondSourceColumnHeaders).toBe("");
+    expect(migrated?.form.mapping.secondSourceWorkbook).toEqual({ notApplicable: false, value: "" });
+    expect(migrated?.form.preview.secondSourceSampleHeaders).toEqual([]);
+    expect(migrated?.form.preview.secondSourceSampleRows).toEqual([]);
+    // The rest of the mapping and preview survive untouched.
+    expect(migrated?.form.mapping.sourceWorkbook).toBe("Sample_A.xlsx");
+    expect(migrated?.form.preview.destSampleRows).toEqual([["Cash", ""]]);
+    // ...and it is immediately usable by both the simulator and the template
+    // generator without throwing, producing the same single-source result.
+    expect(simulatePreview(migrated!.form.preview).status).toBe("ok");
+  });
+
   it("repairs a partially-written preview config instead of trusting it", () => {
     const migrated = migrateProject({
       id: "half-written",

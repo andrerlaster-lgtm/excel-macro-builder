@@ -162,6 +162,23 @@ interface Plan {
   /** Column headers as parsed from step 2, in source order. */
   headers: string[];
   trigger: "manual" | "button";
+  /**
+   * Optional SECOND lookup source. Only ever meaningful when
+   * `kind === "lookup"` -- see `hasSecondSource`. Off by default, and when
+   * off, every code path in this file must emit byte-identical output to
+   * before this feature existed (enforced by a regression test).
+   */
+  secondSourceEnabled: boolean;
+  secondSourceSameWorkbookAsSource: boolean;
+  secondSourceWorkbook: string;
+  secondSourceWorksheet: string;
+  secondSourceRangeOrTable: string;
+  secondSourceHeaders: string[];
+}
+
+/** True only when a lookup macro should read and match against a second source. */
+function hasSecondSource(plan: Plan): boolean {
+  return plan.kind === "lookup" && plan.secondSourceEnabled;
 }
 
 /** Header written above the aggregated value column. */
@@ -263,6 +280,13 @@ function buildConfigBlock(plan: Plan): string[] {
   if (plan.kind === "filter" && plan.filterOperator !== "is-blank" && plan.filterOperator !== "is-not-blank") {
     lines.push(`Private Const FILTER_VALUE As String = ${vbaString(plan.filterValue)}`);
   }
+  if (hasSecondSource(plan)) {
+    if (!plan.secondSourceSameWorkbookAsSource) {
+      lines.push(`Private Const SECOND_SOURCE_WORKBOOK_NAME As String = ${vbaString(plan.secondSourceWorkbook)}`);
+    }
+    lines.push(`Private Const SECOND_SOURCE_SHEET_NAME As String = ${vbaString(plan.secondSourceWorksheet)}`);
+    lines.push(`Private Const SECOND_SOURCE_RANGE_OR_TABLE As String = ${vbaString(plan.secondSourceRangeOrTable)}`);
+  }
   lines.push(`Private Const MACRO_LABEL As String = ${vbaString(plan.macroName)}`);
   lines.push("Private Const ERR_BASE As Long = vbObjectError + 3000");
   lines.push("' --------------------------------------------------------------------");
@@ -313,8 +337,40 @@ function buildDimBlock(plan: Plan): string[] {
     lines.push("    Dim rawKey As String");
     lines.push("    Dim normalizedKey As String");
     lines.push("    Dim matchedSourceRow As Long");
-    lines.push("    Dim matchedCount As Long");
+    if (!hasSecondSource(plan)) {
+      // Single source: keep this pair in its original relative order so the
+      // emitted code is byte-identical to before the second source existed.
+      lines.push("    Dim matchedCount As Long");
+      lines.push("    Dim unmatchedCount As Long");
+      return lines;
+    }
+    // A second source needs its own read/index/column-map variables,
+    // parallel to the primary source's, plus a three-way match breakdown
+    // instead of the single-source `matchedCount`.
     lines.push("    Dim unmatchedCount As Long");
+    lines.push("    Dim matchedFirstOnly As Long");
+    lines.push("    Dim matchedSecondOnly As Long");
+    lines.push("    Dim matchedBoth As Long");
+    lines.push("    Dim foundFirst As Boolean");
+    lines.push("    Dim foundSecond As Boolean");
+    lines.push("");
+    // Always declared, even when reusing sourceBook: `Set source2Book =
+    // sourceBook` (the same-workbook branch of buildReadSecondSourceBlock)
+    // assigns it either way, and Option Explicit requires the Dim to exist
+    // regardless of which branch runs.
+    lines.push("    Dim source2Book As Workbook");
+    lines.push("    Dim source2Sheet As Worksheet");
+    lines.push("    Dim source2Range As Range");
+    lines.push("    Dim source2HeaderRow As Range");
+    lines.push("    Dim source2DataBody As Range");
+    lines.push("    Dim source2Values As Variant");
+    lines.push("    Dim source2RowCount As Long");
+    lines.push("    Dim source2ColumnCount As Long");
+    lines.push("    Dim source2KeyColumn As Long");
+    lines.push("    Dim source2Index As Collection");
+    lines.push("    Dim matchedSource2Row As Long");
+    lines.push("    Dim destColumnMap2() As Long");
+    lines.push("    Dim firstClaimedColumn() As Boolean");
     return lines;
   }
 
@@ -425,6 +481,65 @@ function buildReadSourceBlock(plan: Plan): string[] {
     );
     lines.push("    End If");
   }
+  return lines;
+}
+
+/**
+ * Reads the SECOND lookup source, mirroring `buildReadSourceBlock` exactly --
+ * same error-handling shape, same header-by-name lookup, same
+ * `ResolveDataRange`/`ToArray2D` helpers. Only emitted when
+ * `hasSecondSource(plan)` is true.
+ */
+function buildReadSecondSourceBlock(plan: Plan): string[] {
+  const lines: string[] = [];
+  lines.push("    ' --- Locate the second lookup source --------------------------------");
+  if (plan.secondSourceSameWorkbookAsSource) {
+    lines.push("    ' Same workbook as the primary source: reuse it rather than opening");
+    lines.push("    ' or looking it up a second time under a different logical name.");
+    lines.push("    Set source2Book = sourceBook");
+  } else {
+    lines.push("    Set source2Book = FindOpenWorkbook(SECOND_SOURCE_WORKBOOK_NAME)");
+    lines.push("    If source2Book Is Nothing Then");
+    lines.push(
+      '        Err.Raise ERR_BASE + 16, MACRO_LABEL, "Second source workbook """ & SECOND_SOURCE_WORKBOOK_NAME & """ is not open in Excel. Open it and run this macro again."'
+    );
+    lines.push("    End If");
+  }
+  lines.push("");
+  lines.push("    Set source2Sheet = FindWorksheet(source2Book, SECOND_SOURCE_SHEET_NAME)");
+  lines.push("    If source2Sheet Is Nothing Then");
+  lines.push(
+    '        Err.Raise ERR_BASE + 17, MACRO_LABEL, "Worksheet """ & SECOND_SOURCE_SHEET_NAME & """ was not found for the second lookup source."'
+  );
+  lines.push("    End If");
+  lines.push("");
+  lines.push("    Set source2Range = ResolveDataRange(source2Sheet, SECOND_SOURCE_RANGE_OR_TABLE)");
+  lines.push("    If source2Range Is Nothing Then");
+  lines.push(
+    '        Err.Raise ERR_BASE + 18, MACRO_LABEL, "No table or range named """ & SECOND_SOURCE_RANGE_OR_TABLE & """ was found on worksheet """ & SECOND_SOURCE_SHEET_NAME & """ for the second lookup source."'
+  );
+  lines.push("    End If");
+  lines.push("");
+  lines.push("    If source2Range.Rows.Count < 2 Then");
+  lines.push(
+    '        Err.Raise ERR_BASE + 19, MACRO_LABEL, "The second source range """ & SECOND_SOURCE_RANGE_OR_TABLE & """ has no data rows underneath its header row."'
+  );
+  lines.push("    End If");
+  lines.push("");
+  lines.push("    Set source2HeaderRow = source2Range.Rows(1)");
+  lines.push(
+    "    Set source2DataBody = source2Range.Offset(1, 0).Resize(source2Range.Rows.Count - 1, source2Range.Columns.Count)"
+  );
+  lines.push("    source2Values = ToArray2D(source2DataBody)");
+  lines.push("    source2RowCount = UBound(source2Values, 1)");
+  lines.push("    source2ColumnCount = UBound(source2Values, 2)");
+  lines.push("");
+  lines.push("    source2KeyColumn = ColumnIndexByHeader(source2HeaderRow, KEY_HEADER)");
+  lines.push("    If source2KeyColumn = 0 Then");
+  lines.push(
+    '        Err.Raise ERR_BASE + 20, MACRO_LABEL, "Header """ & KEY_HEADER & """ was not found in the second source header row of """ & SECOND_SOURCE_RANGE_OR_TABLE & """."'
+  );
+  lines.push("    End If");
   return lines;
 }
 
@@ -741,27 +856,95 @@ function buildLookupDestinationBlock(plan: Plan): string[] {
   lines.push("        End If");
   lines.push("    Next c");
   lines.push("");
-  lines.push("    ' --- Match each existing destination row and update it in place ----");
-  lines.push("    matchedCount = 0");
+
+  if (!hasSecondSource(plan)) {
+    lines.push("    ' --- Match each existing destination row and update it in place ----");
+    lines.push("    matchedCount = 0");
+    lines.push("    unmatchedCount = 0");
+    lines.push("    For r = 1 To destDataBody.Rows.Count");
+    lines.push("        rawKey = CellText(destDataBody.Cells(r, destKeyColumn).Value)");
+    lines.push('        normalizedKey = "k:" & LCase$(rawKey)');
+    lines.push("        If Len(rawKey) > 0 And CollectionHasKey(sourceIndex, normalizedKey) Then");
+    lines.push("            matchedSourceRow = sourceIndex.Item(normalizedKey)");
+    lines.push("            matchedCount = matchedCount + 1");
+    lines.push("            For c = 1 To columnCount");
+    lines.push("                If destColumnMap(c) <> 0 Then");
+    lines.push("                    ' Written cell by cell, ONLY into a matched column of a");
+    lines.push("                    ' matched row. Every other cell -- an unmatched row, or a");
+    lines.push("                    ' matched row's unmapped columns, such as its own \"ending\"");
+    lines.push("                    ' style column -- is never assigned, not even its own value.");
+    lines.push("                    destDataBody.Cells(r, destColumnMap(c)).Value = sourceValues(matchedSourceRow, c)");
+    lines.push("                End If");
+    lines.push("            Next c");
+    lines.push("        Else");
+    lines.push("            ' No source row for this key: leave the row completely untouched.");
+    lines.push("            unmatchedCount = unmatchedCount + 1");
+    lines.push("        End If");
+    lines.push("    Next r");
+    return lines;
+  }
+
+  lines.push("    ' Track which destination columns the FIRST source's map already");
+  lines.push("    ' claims, so the second source's map can skip them structurally --");
+  lines.push("    ' this is how \"the first source wins on a genuine header collision\"");
+  lines.push("    ' is enforced by construction, not by hoping write order saves us.");
+  lines.push("    ReDim firstClaimedColumn(1 To destRange.Columns.Count)");
+  lines.push("    For c = 1 To columnCount");
+  lines.push("        If destColumnMap(c) <> 0 Then firstClaimedColumn(destColumnMap(c)) = True");
+  lines.push("    Next c");
+  lines.push("");
+  lines.push("    ReDim destColumnMap2(1 To source2ColumnCount)");
+  lines.push("    For c = 1 To source2ColumnCount");
+  lines.push("        If c = source2KeyColumn Then");
+  lines.push("            destColumnMap2(c) = 0");
+  lines.push("        Else");
+  lines.push("            destColumnMap2(c) = ColumnIndexByHeader(destHeaderRow, CellText(source2HeaderRow.Cells(1, c).Value))");
+  lines.push("            If destColumnMap2(c) <> 0 And firstClaimedColumn(destColumnMap2(c)) Then destColumnMap2(c) = 0");
+  lines.push("        End If");
+  lines.push("    Next c");
+  lines.push("");
+  lines.push("    ' --- Match each existing destination row against BOTH sources and ---");
+  lines.push("    ' --- update it in place ----------------------------------------------");
+  lines.push("    matchedFirstOnly = 0");
+  lines.push("    matchedSecondOnly = 0");
+  lines.push("    matchedBoth = 0");
   lines.push("    unmatchedCount = 0");
   lines.push("    For r = 1 To destDataBody.Rows.Count");
   lines.push("        rawKey = CellText(destDataBody.Cells(r, destKeyColumn).Value)");
   lines.push('        normalizedKey = "k:" & LCase$(rawKey)');
-  lines.push("        If Len(rawKey) > 0 And CollectionHasKey(sourceIndex, normalizedKey) Then");
-  lines.push("            matchedSourceRow = sourceIndex.Item(normalizedKey)");
-  lines.push("            matchedCount = matchedCount + 1");
-  lines.push("            For c = 1 To columnCount");
-  lines.push("                If destColumnMap(c) <> 0 Then");
-  lines.push("                    ' Written cell by cell, ONLY into a matched column of a");
-  lines.push("                    ' matched row. Every other cell -- an unmatched row, or a");
-  lines.push("                    ' matched row's unmapped columns, such as its own \"ending\"");
-  lines.push("                    ' style column -- is never assigned, not even its own value.");
-  lines.push("                    destDataBody.Cells(r, destColumnMap(c)).Value = sourceValues(matchedSourceRow, c)");
-  lines.push("                End If");
-  lines.push("            Next c");
-  lines.push("        Else");
-  lines.push("            ' No source row for this key: leave the row completely untouched.");
+  lines.push("        foundFirst = (Len(rawKey) > 0 And CollectionHasKey(sourceIndex, normalizedKey))");
+  lines.push("        foundSecond = (Len(rawKey) > 0 And CollectionHasKey(source2Index, normalizedKey))");
+  lines.push("");
+  lines.push("        If Not foundFirst And Not foundSecond Then");
+  lines.push("            ' No source has this key: leave the row completely untouched.");
   lines.push("            unmatchedCount = unmatchedCount + 1");
+  lines.push("        Else");
+  lines.push("            If foundFirst And foundSecond Then");
+  lines.push("                matchedBoth = matchedBoth + 1");
+  lines.push("            ElseIf foundFirst Then");
+  lines.push("                matchedFirstOnly = matchedFirstOnly + 1");
+  lines.push("            Else");
+  lines.push("                matchedSecondOnly = matchedSecondOnly + 1");
+  lines.push("            End If");
+  lines.push("");
+  lines.push("            If foundFirst Then");
+  lines.push("                matchedSourceRow = sourceIndex.Item(normalizedKey)");
+  lines.push("                For c = 1 To columnCount");
+  lines.push("                    ' Written cell by cell, ONLY into a matched column of a");
+  lines.push("                    ' matched row -- same discipline as the single-source path.");
+  lines.push("                    If destColumnMap(c) <> 0 Then");
+  lines.push("                        destDataBody.Cells(r, destColumnMap(c)).Value = sourceValues(matchedSourceRow, c)");
+  lines.push("                    End If");
+  lines.push("                Next c");
+  lines.push("            End If");
+  lines.push("            If foundSecond Then");
+  lines.push("                matchedSource2Row = source2Index.Item(normalizedKey)");
+  lines.push("                For c = 1 To source2ColumnCount");
+  lines.push("                    If destColumnMap2(c) <> 0 Then");
+  lines.push("                        destDataBody.Cells(r, destColumnMap2(c)).Value = source2Values(matchedSource2Row, c)");
+  lines.push("                    End If");
+  lines.push("                Next c");
+  lines.push("            End If");
   lines.push("        End If");
   lines.push("    Next r");
   return lines;
@@ -787,6 +970,30 @@ function buildLookupIndexBlock(): string[] {
   lines.push('            normalizedKey = "k:" & LCase$(rawKey)');
   lines.push("            If Not CollectionHasKey(sourceIndex, normalizedKey) Then");
   lines.push("                sourceIndex.Add r, normalizedKey");
+  lines.push("            End If");
+  lines.push("        End If");
+  lines.push("    Next r");
+  return lines;
+}
+
+/**
+ * Builds the second source's own key index, exactly like
+ * `buildLookupIndexBlock` -- same first-occurrence-wins convention, same
+ * normalization -- just over `source2Values`/`source2RowCount`/
+ * `source2KeyColumn`/`source2Index` instead. Only emitted when
+ * `hasSecondSource(plan)` is true.
+ */
+function buildSecondSourceIndexBlock(): string[] {
+  const lines: string[] = [];
+  lines.push("    ' --- Index the second source rows by key ----------------------------");
+  lines.push("    ' Same first-occurrence-wins convention as the primary source's index.");
+  lines.push("    Set source2Index = New Collection");
+  lines.push("    For r = 1 To source2RowCount");
+  lines.push("        rawKey = CellText(source2Values(r, source2KeyColumn))");
+  lines.push("        If Len(rawKey) > 0 Then");
+  lines.push('            normalizedKey = "k:" & LCase$(rawKey)');
+  lines.push("            If Not CollectionHasKey(source2Index, normalizedKey) Then");
+  lines.push("                source2Index.Add r, normalizedKey");
   lines.push("            End If");
   lines.push("        End If");
   lines.push("    Next r");
@@ -877,6 +1084,18 @@ function buildDestinationBlock(plan: Plan): string[] {
 
 function buildReportBlock(plan: Plan): string[] {
   const lines: string[] = [];
+
+  if (plan.kind === "lookup" && hasSecondSource(plan)) {
+    lines.push("    ' --- Report back ----------------------------------------------------");
+    lines.push('    reportText = MACRO_LABEL & " finished." & vbCrLf & _');
+    lines.push('        "Destination rows read: " & destDataBody.Rows.Count & vbCrLf & _');
+    lines.push('        "Matched both sources: " & matchedBoth & vbCrLf & _');
+    lines.push('        "Matched only the first source: " & matchedFirstOnly & vbCrLf & _');
+    lines.push('        "Matched only the second source: " & matchedSecondOnly & vbCrLf & _');
+    lines.push('        "No match in either source, left unchanged: " & unmatchedCount & _');
+    lines.push('        vbCrLf & "This macro was built from a template and has not been verified. Check the result."');
+    return lines;
+  }
 
   if (plan.kind === "lookup") {
     lines.push("    ' --- Report back ----------------------------------------------------");
@@ -1229,6 +1448,14 @@ function buildCleanupObjectResets(plan: Plan): string[] {
     lines.push("    Set destDataBody = Nothing");
     lines.push("    Set destHeaderRow = Nothing");
     lines.push("    Set destRange = Nothing");
+    if (hasSecondSource(plan)) {
+      lines.push("    Set source2DataBody = Nothing");
+      lines.push("    Set source2HeaderRow = Nothing");
+      lines.push("    Set source2Range = Nothing");
+      lines.push("    Set source2Sheet = Nothing");
+      // Always reset, matching the always-declared Dim above.
+      lines.push("    Set source2Book = Nothing");
+    }
   } else {
     lines.push("    Set destAnchor = Nothing");
     lines.push("    Set destTable = Nothing");
@@ -1272,7 +1499,15 @@ function buildVba(plan: Plan, rules: UnimplementedRule[], steps: string[]): stri
   lines.push(...buildReadSourceBlock(plan));
   lines.push("");
   if (plan.kind === "lookup") {
+    if (hasSecondSource(plan)) {
+      lines.push(...buildReadSecondSourceBlock(plan));
+      lines.push("");
+    }
     lines.push(...buildLookupIndexBlock());
+    if (hasSecondSource(plan)) {
+      lines.push("");
+      lines.push(...buildSecondSourceIndexBlock());
+    }
     lines.push("");
     lines.push(...buildLookupDestinationBlock(plan));
   } else {
@@ -1356,12 +1591,24 @@ function buildSteps(plan: Plan): string[] {
       steps.push(`Sort the result by "${plan.keyColumn}" ascending.`);
       break;
     case "lookup":
+      if (hasSecondSource(plan)) {
+        steps.push(
+          `Also read the rows of "${plan.secondSourceRangeOrTable}" on "${plan.secondSourceWorksheet}"` +
+            `${plan.secondSourceSameWorkbookAsSource ? "" : ` in ${plan.secondSourceWorkbook}`}, treating its first row as the header row.`
+        );
+      }
       steps.push(`Read the EXISTING rows of "${plan.destinationRangeOrTable}" on "${plan.destinationWorksheet}", treating its first row as the header row too.`);
       steps.push(`Match each destination row by "${plan.keyColumn}" against the source rows read above.`);
       steps.push(
         `For a match, fill in every destination column that shares a heading with a source column (other than "${plan.keyColumn}") from the matched source row.`
       );
-      steps.push("Leave any destination row with no matching source key completely unchanged.");
+      if (hasSecondSource(plan)) {
+        steps.push(`Also match each destination row by "${plan.keyColumn}" against the second source's rows, filling in any remaining destination column that shares a heading with a second-source column.`);
+        steps.push("If a destination column has a same-named column in both sources, the FIRST source wins and the second source's value for that column is never used.");
+        steps.push("Leave any destination row with no matching key in EITHER source completely unchanged.");
+      } else {
+        steps.push("Leave any destination row with no matching source key completely unchanged.");
+      }
       break;
   }
 
@@ -1424,6 +1671,16 @@ function buildAssumptions(plan: Plan): string[] {
     assumptions.push(
       "When the source has more than one row with the same key, the FIRST one read wins, matching this file's deduplicate convention. A source key that never appears in the destination is simply unused -- lookup never creates a new destination row for it."
     );
+    if (hasSecondSource(plan)) {
+      assumptions.push(
+        "A second lookup source is enabled. A destination row is matched if EITHER source has its key; it is only left unchanged if neither does. If both sources have a column with the same heading, the FIRST source's value wins -- the second source's map is built to skip that heading entirely, so this is not a race."
+      );
+      assumptions.push(
+        plan.secondSourceSameWorkbookAsSource
+          ? "The second source is read from the same already-open workbook as the primary source; it is never opened separately."
+          : "The second source's workbook must already be open in Excel, the same requirement as the primary source. The macro does not open it for you."
+      );
+    }
   } else {
     assumptions.push(
       plan.overwrite
@@ -1472,6 +1729,14 @@ function buildTestPlan(plan: Plan): string[] {
       "Rename a source column header temporarily and confirm the macro stops with an error naming the missing header, rather than writing wrong data."
     );
     steps.push("Point the source at an empty range and confirm the macro reports that there are no data rows.");
+    if (hasSecondSource(plan)) {
+      steps.push(
+        "Confirm a row matched only by the second source gets filled, a row matched only by the first source gets filled, and a row matched by both gets the FIRST source's value for any column they share -- never the second's."
+      );
+      steps.push(
+        "Point the second source at an empty range or a sheet that does not exist and confirm the macro stops with a clear error naming it, rather than silently skipping the second source."
+      );
+    }
     steps.push("Compare the written result against the before/after preview in the app for the same sample rows.");
   } else {
     steps.push(
@@ -1507,6 +1772,11 @@ function buildSafetyCautions(plan: Plan): string[] {
     cautions.push(
       "This macro updates existing destination rows in place. It never clears the destination and never adds or removes rows -- but review which columns it will overwrite (any destination column whose heading matches a source column) before running it on real data."
     );
+    if (hasSecondSource(plan)) {
+      cautions.push(
+        "A second lookup source is enabled. Review both sources' headings against the destination -- if they ever share a heading, the SECOND source's value for that column is silently never used, even though the row still counts as matched."
+      );
+    }
   } else if (plan.overwrite) {
     cautions.push(
       "This macro writes in overwrite mode: existing values in the destination block are cleared. Confirm the destination is what you think it is before running it on real data."
@@ -1674,6 +1944,62 @@ export function generateVbaFromTemplate(form: MacroFormData): TemplateVbaResult 
     valueColumn = matched;
   }
 
+  // The second lookup source is entirely optional and only ever meaningful
+  // for "lookup". A checked-on second source outside lookup is simply
+  // ignored -- the UI never offers that combination, but the generator does
+  // not trust the UI to have enforced it.
+  let secondSourceEnabled = false;
+  let secondSourceSameWorkbookAsSource = true;
+  let secondSourceWorkbook = "";
+  let secondSourceWorksheet = "";
+  let secondSourceRangeOrTable = "";
+  let secondSourceHeaders: string[] = [];
+
+  if (preview.kind === "lookup" && form.mapping.secondSourceEnabled) {
+    secondSourceEnabled = true;
+    secondSourceSameWorkbookAsSource = form.mapping.secondSourceSameWorkbookAsSource;
+
+    if (!secondSourceSameWorkbookAsSource) {
+      const secondDest = filledMaybe(form.mapping.secondSourceWorkbook);
+      if (secondDest === null) {
+        return unsupported(
+          'The second lookup source is set to a different workbook than the primary source, so its workbook file name is required. Fill it in on step 2, or tick "Same workbook as the primary source."'
+        );
+      }
+      secondSourceWorkbook = secondDest;
+    }
+
+    const requiredSecond: [string, string][] = [
+      ["Second source worksheet", form.mapping.secondSourceWorksheet],
+      ["Second source range or table", form.mapping.secondSourceRangeOrTable],
+      ["Second source column headers", form.mapping.secondSourceColumnHeaders],
+    ];
+    const missingSecond = requiredSecond
+      .filter(([, value]) => (value ?? "").trim().length === 0)
+      .map(([label]) => label);
+    if (missingSecond.length > 0) {
+      return unsupported(
+        `The second lookup source is enabled, so these step 2 fields are needed too: ${missingSecond.join(", ")}.`
+      );
+    }
+
+    secondSourceWorksheet = form.mapping.secondSourceWorksheet.trim();
+    secondSourceRangeOrTable = form.mapping.secondSourceRangeOrTable.trim();
+    secondSourceHeaders = parseSampleData(form.mapping.secondSourceColumnHeaders, "").headers;
+    if (secondSourceHeaders.length === 0) {
+      return unsupported(
+        'No column headers could be read from the second lookup source\'s "Column headers" field on step 2. Enter them as a comma-separated list.'
+      );
+    }
+
+    const secondKeyMatch = secondSourceHeaders.find((h) => h.toLowerCase() === keyColumn.toLowerCase());
+    if (!secondKeyMatch) {
+      return unsupported(
+        `Key column "${keyColumn}" must also be one of the second lookup source's column headers (${secondSourceHeaders.join(", ")}). Fix it on step 2 — the template will not guess which column you meant.`
+      );
+    }
+  }
+
   const plan: Plan = {
     macroName: form.task.macroName.trim(),
     sourceWorkbook: form.mapping.sourceWorkbook.trim(),
@@ -1693,6 +2019,12 @@ export function generateVbaFromTemplate(form: MacroFormData): TemplateVbaResult 
     filterValue: (preview.filterValue ?? "").trim(),
     headers,
     trigger,
+    secondSourceEnabled,
+    secondSourceSameWorkbookAsSource,
+    secondSourceWorkbook,
+    secondSourceWorksheet,
+    secondSourceRangeOrTable,
+    secondSourceHeaders,
   };
 
   const unimplementedRules = collectUnimplementedRules(form);
