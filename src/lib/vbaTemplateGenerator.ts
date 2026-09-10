@@ -165,6 +165,17 @@ interface Plan {
 }
 
 /** Header written above the aggregated value column. */
+/**
+ * The headings the macro writes, in the order it writes them. An aggregate
+ * collapses to key + aggregated value; every other operation keeps the source
+ * headings. Used both for the destination-table header match and to tell the
+ * user which headings their table needs.
+ */
+function outputHeaderNames(plan: Plan): string[] {
+  if (plan.kind === "aggregate") return [plan.keyColumn, resultValueHeader(plan)];
+  return plan.headers;
+}
+
 function resultValueHeader(plan: Plan): string {
   if (plan.aggregate === "count") return "Count of rows";
   return `${AGGREGATE_LABELS[plan.aggregate]} of ${plan.valueColumn}`;
@@ -291,6 +302,8 @@ function buildDimBlock(plan: Plan): string[] {
   lines.push("    Dim outputRowCount As Long");
   lines.push("    Dim r As Long");
   lines.push("    Dim c As Long");
+  lines.push("    Dim destColumnMap() As Long");
+  lines.push("    Dim columnBuffer() As Variant");
 
   if (needsKeyLookup(plan)) lines.push("    Dim keyColumn As Long");
   if (needsValueColumn(plan)) lines.push("    Dim valueColumn As Long");
@@ -658,18 +671,23 @@ function buildDestinationBlock(plan: Plan): string[] {
   if (plan.overwrite) {
     lines.push("    ' --- Write (overwrite) ---------------------------------------------");
     lines.push("    If Not destTable Is Nothing Then");
-    lines.push("        If destTable.Range.Columns.Count < outputColumns Then");
-    lines.push(
-      '            Err.Raise ERR_BASE + 10, MACRO_LABEL, "Destination table """ & DEST_RANGE_OR_TABLE & """ has " & destTable.Range.Columns.Count & " column(s), but this macro writes " & outputColumns & "."'
-    );
-    lines.push("        End If");
+    lines.push("        MapOutputColumnsToTable destTable, outputHeaders, outputColumns, destColumnMap");
     lines.push("        ' Clear only the table's own data body. The table header, the rest");
     lines.push("        ' of the sheet, and every row outside the table are untouched, and");
     lines.push("        ' no rows are deleted anywhere.");
     lines.push("        If Not destTable.DataBodyRange Is Nothing Then destTable.DataBodyRange.ClearContents");
     lines.push("        destTable.Resize destTable.Range.Resize(outputRowCount + 1, destTable.Range.Columns.Count)");
     lines.push("        If outputRowCount > 0 Then");
-    lines.push("            destTable.DataBodyRange.Cells(1, 1).Resize(outputRowCount, outputColumns).Value = outputValues");
+    lines.push("            ' Written column by column into the table column whose HEADER");
+    lines.push("            ' matches, never by position, so a reordered or renamed table");
+    lines.push("            ' cannot silently put values under the wrong heading.");
+    lines.push("            For c = 1 To outputColumns");
+    lines.push("                ReDim columnBuffer(1 To outputRowCount, 1 To 1)");
+    lines.push("                For r = 1 To outputRowCount");
+    lines.push("                    columnBuffer(r, 1) = outputValues(r, c)");
+    lines.push("                Next r");
+    lines.push("                destTable.DataBodyRange.Cells(1, destColumnMap(c)).Resize(outputRowCount, 1).Value = columnBuffer");
+    lines.push("            Next c");
     lines.push("        End If");
     lines.push("    Else");
     lines.push("        ' Clear only the block this macro owns: from the anchor cell down,");
@@ -689,15 +707,14 @@ function buildDestinationBlock(plan: Plan): string[] {
     lines.push("    ' --- Write (append) -------------------------------------------------");
     lines.push("    ' Nothing already in the destination is cleared, changed or deleted.");
     lines.push("    If Not destTable Is Nothing Then");
-    lines.push("        If destTable.Range.Columns.Count < outputColumns Then");
-    lines.push(
-      '            Err.Raise ERR_BASE + 10, MACRO_LABEL, "Destination table """ & DEST_RANGE_OR_TABLE & """ has " & destTable.Range.Columns.Count & " column(s), but this macro writes " & outputColumns & "."'
-    );
-    lines.push("        End If");
+    lines.push("        MapOutputColumnsToTable destTable, outputHeaders, outputColumns, destColumnMap");
+    lines.push("        ' Each value goes into the table column whose HEADER matches, never");
+    lines.push("        ' by position, so a reordered or renamed table cannot silently put");
+    lines.push("        ' values under the wrong heading.");
     lines.push("        For r = 1 To outputRowCount");
     lines.push("            Set newRow = destTable.ListRows.Add");
     lines.push("            For c = 1 To outputColumns");
-    lines.push("                newRow.Range.Cells(1, c).Value = outputValues(r, c)");
+    lines.push("                newRow.Range.Cells(1, destColumnMap(c)).Value = outputValues(r, c)");
     lines.push("            Next c");
     lines.push("        Next r");
     lines.push("    Else");
@@ -841,6 +858,53 @@ function buildHelpers(plan: Plan): string[] {
   lines.push("        End If");
   lines.push("    Next i");
   lines.push("    ColumnIndexByHeader = 0");
+  lines.push("End Function");
+  lines.push("");
+
+  lines.push("' Works out which column of the destination table each output column");
+  lines.push("' belongs in, by matching HEADER TEXT rather than position. Without this,");
+  lines.push("' a table whose columns are renamed or reordered would take the values");
+  lines.push("' positionally and file them under the wrong heading without complaining.");
+  lines.push("' Raises a descriptive error instead of writing anything questionable.");
+  lines.push("Private Sub MapOutputColumnsToTable(ByVal targetTable As ListObject, ByRef headers() As Variant, ByVal columnsUsed As Long, ByRef columnMap() As Long)");
+  lines.push("    Dim i As Long");
+  lines.push("    Dim wantedHeader As String");
+  lines.push("");
+  lines.push("    If targetTable.HeaderRowRange Is Nothing Then");
+  lines.push(
+    '        Err.Raise ERR_BASE + 11, MACRO_LABEL, "Destination table """ & targetTable.Name & """ has its header row switched off, so its columns cannot be matched by name. Turn the header row on, or write to a plain range instead."'
+  );
+  lines.push("    End If");
+  lines.push("");
+  lines.push("    If targetTable.Range.Columns.Count < columnsUsed Then");
+  lines.push(
+    '        Err.Raise ERR_BASE + 10, MACRO_LABEL, "Destination table """ & targetTable.Name & """ has " & targetTable.Range.Columns.Count & " column(s), but this macro writes " & columnsUsed & "."'
+  );
+  lines.push("    End If");
+  lines.push("");
+  lines.push("    ReDim columnMap(1 To columnsUsed)");
+  lines.push("    For i = 1 To columnsUsed");
+  lines.push("        wantedHeader = CellText(headers(1, i))");
+  lines.push("        columnMap(i) = ColumnIndexByHeader(targetTable.HeaderRowRange, wantedHeader)");
+  lines.push("        If columnMap(i) = 0 Then");
+  lines.push(
+    '            Err.Raise ERR_BASE + 12, MACRO_LABEL, "Destination table """ & targetTable.Name & """ has no column headed """ & wantedHeader & """, so this macro will not write to it -- putting the value under a different heading would corrupt the report silently. The table headings are: " & TableHeaderList(targetTable) & ". Either rename a table column to """ & wantedHeader & """, or point this macro at a different destination."'
+  );
+  lines.push("        End If");
+  lines.push("    Next i");
+  lines.push("End Sub");
+  lines.push("");
+
+  lines.push("' Readable list of a table's headings, used only in error messages.");
+  lines.push("Private Function TableHeaderList(ByVal targetTable As ListObject) As String");
+  lines.push("    Dim i As Long");
+  lines.push("    Dim parts As String");
+  lines.push("    If targetTable.HeaderRowRange Is Nothing Then Exit Function");
+  lines.push("    For i = 1 To targetTable.HeaderRowRange.Cells.Count");
+  lines.push("        If Len(parts) > 0 Then parts = parts & \", \"");
+  lines.push("        parts = parts & \"\"\"\" & CellText(targetTable.HeaderRowRange.Cells(1, i).Value) & \"\"\"\"");
+  lines.push("    Next i");
+  lines.push("    TableHeaderList = parts");
   lines.push("End Function");
   lines.push("");
 
@@ -1164,6 +1228,15 @@ function buildAssumptions(plan: Plan): string[] {
 
   assumptions.push(
     "The destination table or range is assumed to have at least as many columns as the macro writes; if it does not, the macro stops with a clear error instead of writing part of the result."
+  );
+  assumptions.push(
+    `When the destination is an Excel table, each value is written to the table column whose heading matches the result heading (${outputHeaderNames(
+      plan
+    )
+      .map((h) => `"${h}"`)
+      .join(
+        ", "
+      )}), not to whichever column happens to sit in that position. The macro does not rename your table's headings. If a heading is missing it stops before clearing anything and tells you which headings the table actually has, because filing a value under the wrong heading would corrupt the report silently.`
   );
   assumptions.push(
     "The macro finishes with a message box. If your constraints say it must not prompt, remove that MsgBox yourself."

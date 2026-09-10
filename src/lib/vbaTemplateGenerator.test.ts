@@ -51,6 +51,70 @@ function expectNoForbiddenIdioms(vba: string) {
   }
 }
 
+describe("destination table columns are matched by heading, not by position", () => {
+  it("maps output columns onto the table before clearing anything", () => {
+    const vba = generateVbaFromTemplate(crossWorkbookForm()).vbaCode;
+    const mapAt = vba.indexOf("MapOutputColumnsToTable destTable");
+    const clearAt = vba.indexOf("destTable.DataBodyRange.ClearContents");
+    expect(mapAt).toBeGreaterThan(-1);
+    expect(clearAt).toBeGreaterThan(-1);
+    // A heading mismatch must abort before any destination data is destroyed.
+    expect(mapAt).toBeLessThan(clearAt);
+  });
+
+  it("never writes a positional block into a table", () => {
+    const vba = generateVbaFromTemplate(crossWorkbookForm()).vbaCode;
+    expect(vba).not.toMatch(/DataBodyRange\.Cells\(1, 1\)\.Resize\(outputRowCount, outputColumns\)/);
+    expect(vba).toMatch(/DataBodyRange\.Cells\(1, destColumnMap\(c\)\)/);
+  });
+
+  it("routes appended rows through the heading map too", () => {
+    const form = crossWorkbookForm();
+    form.mapping.appendOrOverwrite = "append";
+    const vba = generateVbaFromTemplate(form).vbaCode;
+    expect(vba).toMatch(/MapOutputColumnsToTable destTable/);
+    expect(vba).toMatch(/newRow\.Range\.Cells\(1, destColumnMap\(c\)\)\.Value/);
+    expect(vba).not.toMatch(/newRow\.Range\.Cells\(1, c\)\.Value/);
+  });
+
+  it("emits a mapper that errors on a missing heading and lists the real ones", () => {
+    const vba = generateVbaFromTemplate(crossWorkbookForm()).vbaCode;
+    expect(vba).toMatch(/Private Sub MapOutputColumnsToTable/);
+    expect(vba).toMatch(/Private Function TableHeaderList/);
+    expect(vba).toMatch(/has no column headed/);
+    expect(vba).toMatch(/TableHeaderList\(targetTable\)/);
+    // Refuses rather than guessing a position.
+    expect(vba).toMatch(/would corrupt the report silently/);
+  });
+
+  it("refuses a table with its header row switched off", () => {
+    const vba = generateVbaFromTemplate(crossWorkbookForm()).vbaCode;
+    expect(vba).toMatch(/HeaderRowRange Is Nothing/);
+    expect(vba).toMatch(/header row switched off/);
+  });
+
+  it("does not rename the destination table's headings", () => {
+    const vba = generateVbaFromTemplate(crossWorkbookForm()).vbaCode;
+    // Writing to HeaderRowRange would break structured references elsewhere.
+    expect(vba).not.toMatch(/HeaderRowRange[^\n]*\.Value\s*=/);
+  });
+
+  it("tells the user which headings the table needs", () => {
+    const result = generateVbaFromTemplate(crossWorkbookForm());
+    const note = result.assumptions.find((a) => a.includes("heading matches"));
+    expect(note).toBeDefined();
+    expect(note).toContain('"Account Name"');
+    expect(note).toContain('"Sum of Amount"');
+    expect(note).toContain("does not rename");
+  });
+
+  it("still writes its own header row for a plain-range destination", () => {
+    // A plain range is a block the macro owns, so there is nothing to match.
+    const vba = generateVbaFromTemplate(baseForm()).vbaCode;
+    expect(vba).toMatch(/destAnchor\.Resize\(1, outputColumns\)\.Value = outputHeaders/);
+  });
+});
+
 describe("generateVbaFromTemplate — the four supported operations", () => {
   it("emits grouping and aggregation logic for aggregate", () => {
     const result = generateVbaFromTemplate(baseForm());
