@@ -24,6 +24,7 @@ const PREVIEW_KIND_OPTIONS: { value: PreviewOperationKind; label: string }[] = [
   { value: "filter", label: "Filter rows" },
   { value: "deduplicate", label: "Remove duplicates" },
   { value: "aggregate", label: "Group and total" },
+  { value: "lookup", label: "Look up and fill" },
 ];
 
 const AGGREGATE_OPTIONS: { value: AggregateFn; label: string }[] = [
@@ -329,10 +330,22 @@ export function MapDataStep({
         </div>
       </fieldset>
 
-      {(preview.kind === "filter" || preview.kind === "deduplicate" || preview.kind === "aggregate") && (
+      {preview.kind === "lookup" && (
+        <p className="field-hint" style={{ marginTop: -8, marginBottom: 16 }}>
+          Fills in EXISTING destination rows by matching a key — unlike the other operations, it never clears,
+          rebuilds, or adds rows; a destination row with no matching key is left exactly as it was.
+        </p>
+      )}
+
+      {(preview.kind === "filter" ||
+        preview.kind === "deduplicate" ||
+        preview.kind === "aggregate" ||
+        preview.kind === "lookup") && (
         <ColumnField
           id="previewKeyColumn"
-          label={preview.kind === "filter" ? "Column to test" : "Group/key column"}
+          label={
+            preview.kind === "filter" ? "Column to test" : preview.kind === "lookup" ? "Key column" : "Group/key column"
+          }
           value={preview.keyColumn}
           columns={previewColumns}
           onChange={(v) => onPreviewChange({ ...preview, keyColumn: v })}

@@ -186,6 +186,164 @@ function matchesFilter(cell: string, operator: FilterOperator, filterValue: stri
 }
 
 /**
+ * Simulates a lookup: for each row of the DESTINATION sample, look up its key
+ * in the SOURCE sample and, on a match, fill in every destination column that
+ * shares a heading with a source column (other than the key). Unlike the
+ * other four kinds, `before`/`after` describe the DESTINATION, not the
+ * source -- that is the entire point of a lookup preview.
+ *
+ * SEMANTIC COUNTERPART: the lookup section of `src/lib/vbaTemplateGenerator.ts`.
+ * Keep first-match-wins on duplicate source keys, "unmatched destination rows
+ * stay untouched", and "unmatched source keys are ignored" in sync between
+ * the two files.
+ */
+function simulateLookup(config: PreviewConfig): PreviewOutcome {
+  const notes: string[] = [];
+
+  let sourceHeaders = (config.sampleHeaders ?? []).map((h) => (h ?? "").trim());
+  if (sourceHeaders.length > MAX_PREVIEW_COLUMNS) sourceHeaders = sourceHeaders.slice(0, MAX_PREVIEW_COLUMNS);
+
+  let sourceRows = (config.sampleRows ?? []).map((row) => {
+    const cells = (row ?? []).slice(0, sourceHeaders.length).map((c) => c ?? "");
+    while (cells.length < sourceHeaders.length) cells.push("");
+    return cells;
+  });
+  if (sourceRows.length > MAX_PREVIEW_ROWS) sourceRows = sourceRows.slice(0, MAX_PREVIEW_ROWS);
+
+  let destHeaders = (config.destSampleHeaders ?? []).map((h) => (h ?? "").trim());
+  if (destHeaders.length > MAX_PREVIEW_COLUMNS) destHeaders = destHeaders.slice(0, MAX_PREVIEW_COLUMNS);
+
+  let destRows = (config.destSampleRows ?? []).map((row) => {
+    const cells = (row ?? []).slice(0, destHeaders.length).map((c) => c ?? "");
+    while (cells.length < destHeaders.length) cells.push("");
+    return cells;
+  });
+  if (destRows.length > MAX_PREVIEW_ROWS) destRows = destRows.slice(0, MAX_PREVIEW_ROWS);
+
+  const before: PreviewTable = { headers: [...destHeaders], rows: destRows.map((r) => [...r]) };
+
+  if (destHeaders.length === 0) {
+    return {
+      ...emptyOutcome(
+        "not-configured",
+        "Add destination column headers in the destination sample grid below to see a before/after example.",
+        before
+      ),
+      notes,
+    };
+  }
+
+  if (destRows.length === 0) {
+    return {
+      ...emptyOutcome(
+        "not-configured",
+        "Add at least one destination sample row to see a before/after example.",
+        before
+      ),
+      notes,
+    };
+  }
+
+  function sourceColumnIndex(name: string): number {
+    const target = (name ?? "").trim().toLowerCase();
+    if (target.length === 0) return -1;
+    return sourceHeaders.findIndex((h) => h.toLowerCase() === target);
+  }
+
+  function destColumnIndex(name: string): number {
+    const target = (name ?? "").trim().toLowerCase();
+    if (target.length === 0) return -1;
+    return destHeaders.findIndex((h) => h.toLowerCase() === target);
+  }
+
+  const keyName = (config.keyColumn ?? "").trim();
+  const srcKeyIndex = sourceColumnIndex(keyName);
+  const destKeyIndex = destColumnIndex(keyName);
+
+  if (srcKeyIndex === -1 || destKeyIndex === -1) {
+    const missingFrom: string[] = [];
+    if (srcKeyIndex === -1) missingFrom.push(`the source columns (${sourceHeaders.join(", ") || "none"})`);
+    if (destKeyIndex === -1) missingFrom.push(`the destination columns (${destHeaders.join(", ") || "none"})`);
+    return {
+      ...emptyOutcome(
+        "error",
+        `Key column "${keyName || "(not set)"}" must be one of both the source and destination sample columns. It is missing from ${missingFrom.join(" and ")}.`,
+        before
+      ),
+      notes,
+    };
+  }
+
+  // Build the source lookup map: normalized key -> first row seen with that
+  // key. A blank key is never usable as a lookup key, so it is skipped.
+  const sourceByKey = new Map<string, string[]>();
+  let duplicateSourceKeys = 0;
+  for (const row of sourceRows) {
+    const key = (row[srcKeyIndex] ?? "").trim().toLowerCase();
+    if (key.length === 0) continue;
+    if (sourceByKey.has(key)) {
+      duplicateSourceKeys += 1;
+      continue;
+    }
+    sourceByKey.set(key, row);
+  }
+  if (duplicateSourceKeys > 0) {
+    notes.push(
+      `${duplicateSourceKeys} duplicate source key value(s) were seen again after their first row; the FIRST matching source row wins for each, matching how this app's deduplicate operation behaves.`
+    );
+  }
+
+  // Every destination column (other than the key) that shares a heading with
+  // a source column gets filled from that source row on a match. A heading
+  // present on only one side is simply never touched.
+  const columnPairs: { destIndex: number; header: string }[] = [];
+  for (let di = 0; di < destHeaders.length; di++) {
+    if (di === destKeyIndex) continue;
+    const si = sourceColumnIndex(destHeaders[di]);
+    if (si !== -1) columnPairs.push({ destIndex: di, header: destHeaders[di] });
+  }
+
+  let matched = 0;
+  let unmatched = 0;
+  const afterRows: string[][] = destRows.map((row) => {
+    const key = (row[destKeyIndex] ?? "").trim().toLowerCase();
+    const sourceRow = key.length > 0 ? sourceByKey.get(key) : undefined;
+    if (!sourceRow) {
+      unmatched += 1;
+      return [...row];
+    }
+    matched += 1;
+    const updated = [...row];
+    for (const pair of columnPairs) {
+      const si = sourceColumnIndex(pair.header);
+      updated[pair.destIndex] = sourceRow[si];
+    }
+    return updated;
+  });
+
+  const steps: string[] = [];
+  steps.push(`Match each row in the destination sample by "${keyName}" against the source sample.`);
+  if (columnPairs.length > 0) {
+    steps.push(`For a match, fill in ${columnPairs.map((p) => `"${p.header}"`).join(", ")} from the source row.`);
+  } else {
+    steps.push(
+      "No destination column (other than the key) shares a heading with a source column, so a match would not fill in anything."
+    );
+  }
+  steps.push("Rows with no match in the source are left unchanged.");
+
+  notes.push(`${matched} of ${destRows.length} destination row(s) matched a source row; ${unmatched} were left unchanged.`);
+
+  return {
+    status: "ok",
+    before,
+    after: { headers: [...destHeaders], rows: afterRows },
+    steps,
+    notes,
+  };
+}
+
+/**
  * Simulates the configured operation against the sample grid.
  *
  * Stages are applied in a fixed order: filter, then deduplicate, then
@@ -200,6 +358,10 @@ export function simulatePreview(config: PreviewConfig): PreviewOutcome {
       "not-configured",
       "Pick a preview operation in step 2 to see a before/after example."
     );
+  }
+
+  if (config.kind === "lookup") {
+    return simulateLookup(config);
   }
 
   const notes: string[] = [];

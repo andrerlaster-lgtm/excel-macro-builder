@@ -102,6 +102,8 @@ describe("buildSpecification — preview section", () => {
       filterValue: "",
       sampleHeaders: ["Region", "Amount"],
       sampleRows: [["East", "100"]],
+      destSampleHeaders: [],
+      destSampleRows: [],
     };
     const spec = buildSpecification(form, fixedNow);
     expect(spec.preview.kind).toBe("aggregate");

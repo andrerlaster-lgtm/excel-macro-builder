@@ -12,7 +12,7 @@ import {
 // archiving is the only removal path; use browser site-data controls to
 // actually clear storage (documented in the README).
 
-export const CURRENT_SCHEMA_VERSION = 3;
+export const CURRENT_SCHEMA_VERSION = 4;
 export const STORAGE_KEY = "excel-macro-builder:projects:v1";
 
 interface StorageEnvelope {
@@ -55,6 +55,13 @@ function migrateFormToV2(form: MacroFormData): MacroFormData {
     sampleHeaders: Array.isArray(raw.sampleHeaders) ? raw.sampleHeaders.map((h) => String(h ?? "")) : [],
     sampleRows: Array.isArray(raw.sampleRows)
       ? raw.sampleRows.map((row) => (Array.isArray(row) ? row.map((c) => String(c ?? "")) : []))
+      : [],
+    // v3 -> v4: `destSampleHeaders`/`destSampleRows` added for the "lookup"
+    // preview kind. Backfilled to empty arrays on any older draft that lacks
+    // them, same as every other field in this function.
+    destSampleHeaders: Array.isArray(raw.destSampleHeaders) ? raw.destSampleHeaders.map((h) => String(h ?? "")) : [],
+    destSampleRows: Array.isArray(raw.destSampleRows)
+      ? raw.destSampleRows.map((row) => (Array.isArray(row) ? row.map((c) => String(c ?? "")) : []))
       : [],
   };
   return { ...form, preview };
@@ -104,6 +111,9 @@ export function migrateProject(raw: unknown): SavedProject | null {
   // which is safe to run on records that already carry it).
   // version 2 -> 3: `lastResult.generator` added (handled by migrateResultToV3
   // above, which is likewise safe to re-run).
+  // version 3 -> 4: `form.preview.destSampleHeaders`/`destSampleRows` added
+  // for the "lookup" preview kind (handled by migrateFormToV2 above, which
+  // backfills them to empty arrays and is likewise safe to re-run).
   void version;
   return base;
 }

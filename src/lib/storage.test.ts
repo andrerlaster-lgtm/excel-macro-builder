@@ -137,7 +137,7 @@ describe("storage", () => {
     });
 
     expect(migrated).not.toBeNull();
-    expect(migrated?.schemaVersion).toBe(3);
+    expect(migrated?.schemaVersion).toBe(CURRENT_SCHEMA_VERSION);
     expect(migrated?.title).toBe("Pre-template Draft");
     // The AI path was the only generator at v2, so that is the honest default.
     // It must never be backfilled as "template", which would present model
@@ -175,6 +175,42 @@ describe("storage", () => {
   it("keeps a project with no saved result at null rather than inventing one", () => {
     const migrated = migrateProject({ id: "no-result", schemaVersion: 2, form: emptyFormData() });
     expect(migrated?.lastResult).toBeNull();
+  });
+
+  it("migrates a v3 record forward to v4 by backfilling the lookup destination sample grid", () => {
+    const v3Preview = {
+      kind: "aggregate",
+      keyColumn: "Region",
+      valueColumn: "Amount",
+      aggregate: "sum",
+      filterOperator: "equals",
+      filterValue: "",
+      sampleHeaders: ["Region", "Amount"],
+      sampleRows: [["East", "100"]],
+      // note: no destSampleHeaders/destSampleRows -- they did not exist at v3
+    };
+    const migrated = migrateProject({
+      id: "v3-project",
+      schemaVersion: 3,
+      title: "Pre-lookup Draft",
+      createdAt: "2026-03-01T00:00:00.000Z",
+      updatedAt: "2026-03-01T00:00:00.000Z",
+      archived: false,
+      form: { ...emptyFormData(), preview: v3Preview },
+      lastSpecification: null,
+      lastResult: null,
+    });
+
+    expect(migrated).not.toBeNull();
+    expect(migrated?.schemaVersion).toBe(CURRENT_SCHEMA_VERSION);
+    expect(migrated?.title).toBe("Pre-lookup Draft");
+    expect(migrated?.form.preview.destSampleHeaders).toEqual([]);
+    expect(migrated?.form.preview.destSampleRows).toEqual([]);
+    // The rest of the preview config survives untouched.
+    expect(migrated?.form.preview.sampleHeaders).toEqual(["Region", "Amount"]);
+    expect(migrated?.form.preview.kind).toBe("aggregate");
+    // ...and it is immediately usable by the simulator without throwing.
+    expect(simulatePreview(migrated!.form.preview).status).toBe("ok");
   });
 
   it("repairs a partially-written preview config instead of trusting it", () => {

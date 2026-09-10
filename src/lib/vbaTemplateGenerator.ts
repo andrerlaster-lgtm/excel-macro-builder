@@ -291,21 +291,43 @@ function buildDimBlock(plan: Plan): string[] {
   lines.push("");
   lines.push("    Dim destBook As Workbook");
   lines.push("    Dim destSheet As Worksheet");
-  lines.push("    Dim destTable As ListObject");
-  lines.push("    Dim destAnchor As Range");
   lines.push("");
   lines.push("    Dim rowCount As Long");
   lines.push("    Dim columnCount As Long");
+  lines.push("    Dim r As Long");
+  lines.push("    Dim c As Long");
+
+  if (needsKeyLookup(plan)) lines.push("    Dim keyColumn As Long");
+
+  if (plan.kind === "lookup") {
+    // Lookup reads the destination like a second source (see
+    // buildLookupDestinationBlock), then updates matched rows in place --
+    // it never builds a fresh "output" table the way the other four kinds
+    // do, so none of the outputHeaders/outputValues machinery below applies.
+    lines.push("    Dim destRange As Range");
+    lines.push("    Dim destHeaderRow As Range");
+    lines.push("    Dim destDataBody As Range");
+    lines.push("    Dim destKeyColumn As Long");
+    lines.push("    Dim destColumnMap() As Long");
+    lines.push("    Dim sourceIndex As Collection");
+    lines.push("    Dim rawKey As String");
+    lines.push("    Dim normalizedKey As String");
+    lines.push("    Dim matchedSourceRow As Long");
+    lines.push("    Dim matchedCount As Long");
+    lines.push("    Dim unmatchedCount As Long");
+    return lines;
+  }
+
+  lines.push("    Dim destTable As ListObject");
+  lines.push("    Dim destAnchor As Range");
+  lines.push("");
   lines.push("    Dim outputHeaders() As Variant");
   lines.push("    Dim outputValues() As Variant");
   lines.push("    Dim outputColumns As Long");
   lines.push("    Dim outputRowCount As Long");
-  lines.push("    Dim r As Long");
-  lines.push("    Dim c As Long");
   lines.push("    Dim destColumnMap() As Long");
   lines.push("    Dim columnBuffer() As Variant");
 
-  if (needsKeyLookup(plan)) lines.push("    Dim keyColumn As Long");
   if (needsValueColumn(plan)) lines.push("    Dim valueColumn As Long");
 
   if (plan.kind === "filter" || plan.kind === "deduplicate") {
@@ -628,7 +650,12 @@ function buildTransformBlock(plan: Plan): string[] {
   return lines;
 }
 
-function buildDestinationBlock(plan: Plan): string[] {
+/**
+ * Locates the destination workbook and worksheet. Shared by every write
+ * mode, and by lookup's read-then-update path, so the "which workbook, which
+ * sheet" logic can never drift between them.
+ */
+function buildLocateDestinationBlock(plan: Plan): string[] {
   const lines: string[] = [];
   lines.push("    ' --- Locate the destination ----------------------------------------");
   if (plan.sameWorkbook) {
@@ -656,6 +683,119 @@ function buildDestinationBlock(plan: Plan): string[] {
     '        Err.Raise ERR_BASE + 8, MACRO_LABEL, "Worksheet """ & DEST_SHEET_NAME & """ was not found in the destination workbook."'
   );
   lines.push("    End If");
+  return lines;
+}
+
+/**
+ * Reads and updates the destination for a LOOKUP macro.
+ *
+ * SEMANTIC COUNTERPART: the lookup path in `src/lib/previewSimulator.ts`
+ * (see `simulateLookup`). Unlike every other operation's destination block,
+ * this one READS the destination's existing rows first -- via
+ * `ResolveDataRange`, the same helper the source uses -- because lookup only
+ * ever updates rows that already exist. It never clears anything and never
+ * adds or removes a row.
+ */
+function buildLookupDestinationBlock(plan: Plan): string[] {
+  const lines: string[] = [];
+  lines.push(...buildLocateDestinationBlock(plan));
+  lines.push("");
+  lines.push("    ' Lookup treats the destination like a second source: it must already");
+  lines.push("    ' hold real rows under a header row, because this pass UPDATES existing");
+  lines.push("    ' rows in place and never creates new ones. That is the one structural");
+  lines.push("    ' difference from the other operations, which only need a write target.");
+  lines.push("    Set destRange = ResolveDataRange(destSheet, DEST_RANGE_OR_TABLE)");
+  lines.push("    If destRange Is Nothing Then");
+  lines.push(
+    '        Err.Raise ERR_BASE + 13, MACRO_LABEL, "No table or range named """ & DEST_RANGE_OR_TABLE & """ was found on worksheet """ & DEST_SHEET_NAME & """. Lookup reads the existing destination rows, so it must resolve to a table or range that has a header row."'
+  );
+  lines.push("    End If");
+  lines.push("");
+  lines.push("    If destRange.Rows.Count < 2 Then");
+  lines.push(
+    '        Err.Raise ERR_BASE + 14, MACRO_LABEL, "The destination range """ & DEST_RANGE_OR_TABLE & """ has no data rows underneath its header row. Lookup only fills EXISTING destination rows -- it never adds any -- so there must be at least one row to match against."'
+  );
+  lines.push("    End If");
+  lines.push("");
+  lines.push("    Set destHeaderRow = destRange.Rows(1)");
+  lines.push("    Set destDataBody = destRange.Offset(1, 0).Resize(destRange.Rows.Count - 1, destRange.Columns.Count)");
+  lines.push("");
+  lines.push("    destKeyColumn = ColumnIndexByHeader(destHeaderRow, KEY_HEADER)");
+  lines.push("    If destKeyColumn = 0 Then");
+  lines.push(
+    '        Err.Raise ERR_BASE + 15, MACRO_LABEL, "Header """ & KEY_HEADER & """ was not found in the destination header row of """ & DEST_RANGE_OR_TABLE & """."'
+  );
+  lines.push("    End If");
+  lines.push("");
+  lines.push("    ' Map each SOURCE column (other than the key) onto a destination column");
+  lines.push("    ' with the same heading, if one exists. A source column with no matching");
+  lines.push("    ' destination heading -- or a destination column with no matching source");
+  lines.push("    ' heading, such as a column the source never had -- is simply never");
+  lines.push("    ' touched. That is expected here, not an error.");
+  lines.push("    ReDim destColumnMap(1 To columnCount)");
+  lines.push("    For c = 1 To columnCount");
+  lines.push("        If c = keyColumn Then");
+  lines.push("            destColumnMap(c) = 0");
+  lines.push("        Else");
+  lines.push("            destColumnMap(c) = ColumnIndexByHeader(destHeaderRow, CellText(headerRow.Cells(1, c).Value))");
+  lines.push("        End If");
+  lines.push("    Next c");
+  lines.push("");
+  lines.push("    ' --- Match each existing destination row and update it in place ----");
+  lines.push("    matchedCount = 0");
+  lines.push("    unmatchedCount = 0");
+  lines.push("    For r = 1 To destDataBody.Rows.Count");
+  lines.push("        rawKey = CellText(destDataBody.Cells(r, destKeyColumn).Value)");
+  lines.push('        normalizedKey = "k:" & LCase$(rawKey)');
+  lines.push("        If Len(rawKey) > 0 And CollectionHasKey(sourceIndex, normalizedKey) Then");
+  lines.push("            matchedSourceRow = sourceIndex.Item(normalizedKey)");
+  lines.push("            matchedCount = matchedCount + 1");
+  lines.push("            For c = 1 To columnCount");
+  lines.push("                If destColumnMap(c) <> 0 Then");
+  lines.push("                    ' Written cell by cell, ONLY into a matched column of a");
+  lines.push("                    ' matched row. Every other cell -- an unmatched row, or a");
+  lines.push("                    ' matched row's unmapped columns, such as its own \"ending\"");
+  lines.push("                    ' style column -- is never assigned, not even its own value.");
+  lines.push("                    destDataBody.Cells(r, destColumnMap(c)).Value = sourceValues(matchedSourceRow, c)");
+  lines.push("                End If");
+  lines.push("            Next c");
+  lines.push("        Else");
+  lines.push("            ' No source row for this key: leave the row completely untouched.");
+  lines.push("            unmatchedCount = unmatchedCount + 1");
+  lines.push("        End If");
+  lines.push("    Next r");
+  return lines;
+}
+
+/**
+ * Builds the Collection that indexes source rows by their key, so the
+ * destination loop in `buildLookupDestinationBlock` can look each one up in
+ * O(1). First occurrence wins on a duplicate key -- the same convention this
+ * file already uses for `deduplicate`, and the same rule
+ * `previewSimulator.ts`'s `simulateLookup` uses.
+ */
+function buildLookupIndexBlock(): string[] {
+  const lines: string[] = [];
+  lines.push("    ' --- Index the source rows by key -----------------------------------");
+  lines.push("    ' First occurrence wins for a duplicate key, matching the preview and");
+  lines.push("    ' this file's deduplicate convention. A blank key can never be matched");
+  lines.push("    ' against, so it is never indexed.");
+  lines.push("    Set sourceIndex = New Collection");
+  lines.push("    For r = 1 To rowCount");
+  lines.push("        rawKey = CellText(sourceValues(r, keyColumn))");
+  lines.push("        If Len(rawKey) > 0 Then");
+  lines.push('            normalizedKey = "k:" & LCase$(rawKey)');
+  lines.push("            If Not CollectionHasKey(sourceIndex, normalizedKey) Then");
+  lines.push("                sourceIndex.Add r, normalizedKey");
+  lines.push("            End If");
+  lines.push("        End If");
+  lines.push("    Next r");
+  return lines;
+}
+
+function buildDestinationBlock(plan: Plan): string[] {
+  const lines: string[] = [];
+  lines.push(...buildLocateDestinationBlock(plan));
   lines.push("");
   lines.push("    Set destTable = FindListObject(destSheet, DEST_RANGE_OR_TABLE)");
   lines.push("    If destTable Is Nothing Then");
@@ -737,6 +877,17 @@ function buildDestinationBlock(plan: Plan): string[] {
 
 function buildReportBlock(plan: Plan): string[] {
   const lines: string[] = [];
+
+  if (plan.kind === "lookup") {
+    lines.push("    ' --- Report back ----------------------------------------------------");
+    lines.push('    reportText = MACRO_LABEL & " finished." & vbCrLf & _');
+    lines.push('        "Destination rows read: " & destDataBody.Rows.Count & vbCrLf & _');
+    lines.push('        "Matched and updated: " & matchedCount & vbCrLf & _');
+    lines.push('        "No match in the source, left unchanged: " & unmatchedCount & _');
+    lines.push('        vbCrLf & "This macro was built from a template and has not been verified. Check the result."');
+    return lines;
+  }
+
   const modeWord = plan.overwrite ? "overwrite" : "append";
   lines.push("    ' --- Report back ----------------------------------------------------");
   lines.push(
@@ -933,7 +1084,7 @@ function buildHelpers(plan: Plan): string[] {
   lines.push("End Function");
   lines.push("");
 
-  if (plan.kind === "deduplicate" || plan.kind === "aggregate") {
+  if (plan.kind === "deduplicate" || plan.kind === "aggregate" || plan.kind === "lookup") {
     lines.push("' True when the collection already holds this key.");
     lines.push("Private Function CollectionHasKey(ByVal target As Collection, ByVal keyName As String) As Boolean");
     lines.push("    Dim probe As Variant");
@@ -1061,6 +1212,32 @@ function buildHelpers(plan: Plan): string[] {
   return lines;
 }
 
+/**
+ * Object variables reset to Nothing in the Cleanup label. Differs by kind
+ * because lookup declares `destRange`/`destHeaderRow`/`destDataBody` instead
+ * of `destTable`/`destAnchor` (see `buildDimBlock`), and Option Explicit
+ * means only declared variables may appear here.
+ */
+function buildCleanupObjectResets(plan: Plan): string[] {
+  const lines: string[] = [];
+  lines.push("    Set headerRow = Nothing");
+  lines.push("    Set dataBody = Nothing");
+  lines.push("    Set sourceRange = Nothing");
+  lines.push("    Set sourceSheet = Nothing");
+  lines.push("    Set sourceBook = Nothing");
+  if (plan.kind === "lookup") {
+    lines.push("    Set destDataBody = Nothing");
+    lines.push("    Set destHeaderRow = Nothing");
+    lines.push("    Set destRange = Nothing");
+  } else {
+    lines.push("    Set destAnchor = Nothing");
+    lines.push("    Set destTable = Nothing");
+  }
+  lines.push("    Set destSheet = Nothing");
+  lines.push("    Set destBook = Nothing");
+  return lines;
+}
+
 function buildVba(plan: Plan, rules: UnimplementedRule[], steps: string[]): string {
   const lines: string[] = [];
   lines.push("Option Explicit");
@@ -1094,9 +1271,15 @@ function buildVba(plan: Plan, rules: UnimplementedRule[], steps: string[]): stri
   lines.push("");
   lines.push(...buildReadSourceBlock(plan));
   lines.push("");
-  lines.push(...buildTransformBlock(plan));
-  lines.push("");
-  lines.push(...buildDestinationBlock(plan));
+  if (plan.kind === "lookup") {
+    lines.push(...buildLookupIndexBlock());
+    lines.push("");
+    lines.push(...buildLookupDestinationBlock(plan));
+  } else {
+    lines.push(...buildTransformBlock(plan));
+    lines.push("");
+    lines.push(...buildDestinationBlock(plan));
+  }
   lines.push("");
   lines.push(...buildReportBlock(plan));
   lines.push("");
@@ -1122,15 +1305,7 @@ function buildVba(plan: Plan, rules: UnimplementedRule[], steps: string[]): stri
   lines.push("        Application.ScreenUpdating = prevScreenUpdating");
   lines.push("    End If");
   lines.push("");
-  lines.push("    Set headerRow = Nothing");
-  lines.push("    Set dataBody = Nothing");
-  lines.push("    Set sourceRange = Nothing");
-  lines.push("    Set sourceSheet = Nothing");
-  lines.push("    Set sourceBook = Nothing");
-  lines.push("    Set destAnchor = Nothing");
-  lines.push("    Set destTable = Nothing");
-  lines.push("    Set destSheet = Nothing");
-  lines.push("    Set destBook = Nothing");
+  lines.push(...buildCleanupObjectResets(plan));
   lines.push("");
   lines.push("    If failed Then");
   lines.push('        MsgBox failMessage, vbExclamation, "Excel Macro Builder"');
@@ -1180,14 +1355,28 @@ function buildSteps(plan: Plan): string[] {
       );
       steps.push(`Sort the result by "${plan.keyColumn}" ascending.`);
       break;
+    case "lookup":
+      steps.push(`Read the EXISTING rows of "${plan.destinationRangeOrTable}" on "${plan.destinationWorksheet}", treating its first row as the header row too.`);
+      steps.push(`Match each destination row by "${plan.keyColumn}" against the source rows read above.`);
+      steps.push(
+        `For a match, fill in every destination column that shares a heading with a source column (other than "${plan.keyColumn}") from the matched source row.`
+      );
+      steps.push("Leave any destination row with no matching source key completely unchanged.");
+      break;
   }
 
   const destBook = plan.sameWorkbook ? "the same workbook" : plan.destinationWorkbook;
-  steps.push(
-    plan.overwrite
-      ? `Clear only the destination block "${plan.destinationRangeOrTable}" on "${plan.destinationWorksheet}" in ${destBook}, then write the result there.`
-      : `Append the result underneath the existing rows of "${plan.destinationRangeOrTable}" on "${plan.destinationWorksheet}" in ${destBook}.`
-  );
+  if (plan.kind === "lookup") {
+    steps.push(
+      `Update matched rows in place on "${plan.destinationRangeOrTable}" on "${plan.destinationWorksheet}" in ${destBook}. Nothing is cleared, and no destination rows are added or removed.`
+    );
+  } else {
+    steps.push(
+      plan.overwrite
+        ? `Clear only the destination block "${plan.destinationRangeOrTable}" on "${plan.destinationWorksheet}" in ${destBook}, then write the result there.`
+        : `Append the result underneath the existing rows of "${plan.destinationRangeOrTable}" on "${plan.destinationWorksheet}" in ${destBook}.`
+    );
+  }
   steps.push("Restore Excel's Application settings and report what was written in a message box.");
   return steps;
 }
@@ -1197,8 +1386,13 @@ function buildAssumptions(plan: Plan): string[] {
     "The first row of the source range or table is the header row; all columns are found by header name, never by position.",
     "The source workbook is already open in Excel. The macro reports a clear error rather than opening it for you.",
     "Key comparison, grouping and sorting are case-insensitive and ignore surrounding spaces, matching the on-screen preview.",
-    "Sorting uses VBA's case-insensitive text comparison, which can order accented or non-Latin text slightly differently from the browser preview.",
   ];
+
+  if (needsSort(plan)) {
+    assumptions.push(
+      "Sorting uses VBA's case-insensitive text comparison, which can order accented or non-Latin text slightly differently from the browser preview."
+    );
+  }
 
   if (plan.kind === "aggregate" && plan.aggregate !== "count") {
     assumptions.push(
@@ -1220,24 +1414,37 @@ function buildAssumptions(plan: Plan): string[] {
     );
   }
 
-  assumptions.push(
-    plan.overwrite
-      ? "Overwrite clears only the destination table's data body, or the rectangle from the anchor cell down across the columns written. It never clears the whole sheet and never deletes rows."
-      : "Append adds rows underneath what is already there and clears nothing."
-  );
+  if (plan.kind === "lookup") {
+    assumptions.push(
+      "Lookup never clears anything and never adds or removes destination rows. Each EXISTING destination row is looked up by its key; a match overwrites only the destination columns that share a heading with a source column (the key column itself is never overwritten), and a row with no matching source key is left completely untouched."
+    );
+    assumptions.push(
+      `A destination column with no same-named source column, or a source column with no same-named destination column (other than "${plan.keyColumn}"), is simply never written to -- that is expected, not an error.`
+    );
+    assumptions.push(
+      "When the source has more than one row with the same key, the FIRST one read wins, matching this file's deduplicate convention. A source key that never appears in the destination is simply unused -- lookup never creates a new destination row for it."
+    );
+  } else {
+    assumptions.push(
+      plan.overwrite
+        ? "Overwrite clears only the destination table's data body, or the rectangle from the anchor cell down across the columns written. It never clears the whole sheet and never deletes rows."
+        : "Append adds rows underneath what is already there and clears nothing."
+    );
 
-  assumptions.push(
-    "The destination table or range is assumed to have at least as many columns as the macro writes; if it does not, the macro stops with a clear error instead of writing part of the result."
-  );
-  assumptions.push(
-    `When the destination is an Excel table, each value is written to the table column whose heading matches the result heading (${outputHeaderNames(
-      plan
-    )
-      .map((h) => `"${h}"`)
-      .join(
-        ", "
-      )}), not to whichever column happens to sit in that position. The macro does not rename your table's headings. If a heading is missing it stops before clearing anything and tells you which headings the table actually has, because filing a value under the wrong heading would corrupt the report silently.`
-  );
+    assumptions.push(
+      "The destination table or range is assumed to have at least as many columns as the macro writes; if it does not, the macro stops with a clear error instead of writing part of the result."
+    );
+    assumptions.push(
+      `When the destination is an Excel table, each value is written to the table column whose heading matches the result heading (${outputHeaderNames(
+        plan
+      )
+        .map((h) => `"${h}"`)
+        .join(
+          ", "
+        )}), not to whichever column happens to sit in that position. The macro does not rename your table's headings. If a heading is missing it stops before clearing anything and tells you which headings the table actually has, because filing a value under the wrong heading would corrupt the report silently.`
+    );
+  }
+
   assumptions.push(
     "The macro finishes with a message box. If your constraints say it must not prompt, remove that MsgBox yourself."
   );
@@ -1246,20 +1453,48 @@ function buildAssumptions(plan: Plan): string[] {
 }
 
 function buildTestPlan(plan: Plan): string[] {
-  return [
+  const steps: string[] = [
     `Make a COPY of ${plan.sourceWorkbook}${plan.sameWorkbook ? "" : ` and ${plan.destinationWorkbook}`} and work only on the copy.`,
     "Read the whole macro before running it, especially the CONFIGURATION block and the not-implemented comment block at the top.",
-    `Run it once with the destination "${plan.destinationRangeOrTable}" empty and confirm the header row and results land where you expect.`,
-    plan.overwrite
-      ? "Run it a second time and confirm the previous result is replaced, and that nothing outside the destination block changed."
-      : "Run it a second time and confirm the new rows are appended below the previous ones, with nothing overwritten.",
-    "Rename a source column header temporarily and confirm the macro stops with an error naming the missing header, rather than writing wrong data.",
-    "Point the source at an empty range and confirm the macro reports that there are no data rows.",
-    plan.kind === "aggregate" && plan.aggregate !== "count"
-      ? "Put text (e.g. \"n/a\") and a blank in the value column, then confirm the final message box reports them as skipped and the totals exclude them."
-      : "Compare the written result against the before/after preview in the app for the same sample rows.",
-    "Check Excel afterwards: calculation should be back to Automatic and events should be back on.",
   ];
+
+  if (plan.kind === "lookup") {
+    steps.push(
+      `Confirm "${plan.destinationRangeOrTable}" on "${plan.destinationWorksheet}" already has real rows under a header row before running -- lookup only updates existing rows, and stops with an error if there is nothing to match against.`
+    );
+    steps.push(
+      "Run it once and confirm: matched rows have only their shared-heading columns updated, an unmatched row is byte-for-byte identical to before, and the destination's row count is exactly the same as before the run."
+    );
+    steps.push(
+      "Temporarily duplicate a key in the source sample and confirm the matched destination row keeps using the FIRST matching source row's values, not a later one."
+    );
+    steps.push(
+      "Rename a source column header temporarily and confirm the macro stops with an error naming the missing header, rather than writing wrong data."
+    );
+    steps.push("Point the source at an empty range and confirm the macro reports that there are no data rows.");
+    steps.push("Compare the written result against the before/after preview in the app for the same sample rows.");
+  } else {
+    steps.push(
+      `Run it once with the destination "${plan.destinationRangeOrTable}" empty and confirm the header row and results land where you expect.`
+    );
+    steps.push(
+      plan.overwrite
+        ? "Run it a second time and confirm the previous result is replaced, and that nothing outside the destination block changed."
+        : "Run it a second time and confirm the new rows are appended below the previous ones, with nothing overwritten."
+    );
+    steps.push(
+      "Rename a source column header temporarily and confirm the macro stops with an error naming the missing header, rather than writing wrong data."
+    );
+    steps.push("Point the source at an empty range and confirm the macro reports that there are no data rows.");
+    steps.push(
+      plan.kind === "aggregate" && plan.aggregate !== "count"
+        ? "Put text (e.g. \"n/a\") and a blank in the value column, then confirm the final message box reports them as skipped and the totals exclude them."
+        : "Compare the written result against the before/after preview in the app for the same sample rows."
+    );
+  }
+
+  steps.push("Check Excel afterwards: calculation should be back to Automatic and events should be back on.");
+  return steps;
 }
 
 function buildSafetyCautions(plan: Plan): string[] {
@@ -1268,7 +1503,11 @@ function buildSafetyCautions(plan: Plan): string[] {
     "The template implements ONLY the structured operation you picked. Every free-text rule you typed is listed as not implemented and is genuinely absent from the code.",
     "The app has never checked that these workbooks, sheets, tables or headers exist. Those names are text you typed.",
   ];
-  if (plan.overwrite) {
+  if (plan.kind === "lookup") {
+    cautions.push(
+      "This macro updates existing destination rows in place. It never clears the destination and never adds or removes rows -- but review which columns it will overwrite (any destination column whose heading matches a source column) before running it on real data."
+    );
+  } else if (plan.overwrite) {
     cautions.push(
       "This macro writes in overwrite mode: existing values in the destination block are cleared. Confirm the destination is what you think it is before running it on real data."
     );
@@ -1345,7 +1584,7 @@ export function generateVbaFromTemplate(form: MacroFormData): TemplateVbaResult 
   const preview = form.preview;
   if (!preview || preview.kind === "not-configured") {
     return unsupported(
-      'No preview operation is configured. Go back to step 2 and pick one under "Preview operation" (copy rows, filter rows, remove duplicates, or group and total). The deterministic builder works from that picker, so it has nothing to build from until you choose one.'
+      'No preview operation is configured. Go back to step 2 and pick one under "Preview operation" (copy rows, filter rows, remove duplicates, group and total, or look up and fill). The deterministic builder works from that picker, so it has nothing to build from until you choose one.'
     );
   }
 
@@ -1407,7 +1646,8 @@ export function generateVbaFromTemplate(form: MacroFormData): TemplateVbaResult 
 
   let keyColumn = "";
   if (preview.kind !== "copy") {
-    const label = preview.kind === "filter" ? "Column to test" : "Group/key column";
+    const label =
+      preview.kind === "filter" ? "Column to test" : preview.kind === "lookup" ? "Key column" : "Group/key column";
     const matched = findHeader(preview.keyColumn);
     if (matched === null) {
       const chosen = (preview.keyColumn ?? "").trim();
@@ -1466,14 +1706,22 @@ export function generateVbaFromTemplate(form: MacroFormData): TemplateVbaResult 
         ? `filter on "${plan.keyColumn}"`
         : plan.kind === "deduplicate"
           ? `deduplicate by "${plan.keyColumn}"`
-          : "straight copy";
+          : plan.kind === "lookup"
+            ? `look up and fill by "${plan.keyColumn}"`
+            : "straight copy";
 
   const summary =
-    `Template-generated VBA (no AI): ${operationWord} from "${plan.sourceRangeOrTable}" on ` +
-    `"${plan.sourceWorksheet}", written to "${plan.destinationRangeOrTable}" on "${plan.destinationWorksheet}"` +
-    `${plan.sameWorkbook ? " in the same workbook" : ` in ${plan.destinationWorkbook}`} in ` +
-    `${plan.overwrite ? "overwrite" : "append"} mode. Built from the same structured operation as the on-screen ` +
-    `preview, so the two cannot disagree. It implements nothing else.`;
+    plan.kind === "lookup"
+      ? `Template-generated VBA (no AI): look up and fill existing rows of "${plan.destinationRangeOrTable}" on ` +
+        `"${plan.destinationWorksheet}"${plan.sameWorkbook ? " in the same workbook" : ` in ${plan.destinationWorkbook}`} ` +
+        `by matching "${plan.keyColumn}" against "${plan.sourceRangeOrTable}" on "${plan.sourceWorksheet}". No rows are ` +
+        `cleared, added, or removed. Built from the same structured operation as the on-screen preview, so the two ` +
+        `cannot disagree. It implements nothing else.`
+      : `Template-generated VBA (no AI): ${operationWord} from "${plan.sourceRangeOrTable}" on ` +
+        `"${plan.sourceWorksheet}", written to "${plan.destinationRangeOrTable}" on "${plan.destinationWorksheet}"` +
+        `${plan.sameWorkbook ? " in the same workbook" : ` in ${plan.destinationWorkbook}`} in ` +
+        `${plan.overwrite ? "overwrite" : "append"} mode. Built from the same structured operation as the on-screen ` +
+        `preview, so the two cannot disagree. It implements nothing else.`;
 
   return {
     status: "ok",

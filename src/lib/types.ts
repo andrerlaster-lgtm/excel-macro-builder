@@ -68,7 +68,7 @@ export interface RunConfig {
 // the preview never executes or inspects the generated code.
 // ---------------------------------------------------------------------------
 
-export type PreviewOperationKind = "not-configured" | "copy" | "filter" | "aggregate" | "deduplicate";
+export type PreviewOperationKind = "not-configured" | "copy" | "filter" | "aggregate" | "deduplicate" | "lookup";
 
 export type AggregateFn = "sum" | "count" | "average" | "min" | "max";
 
@@ -93,6 +93,16 @@ export interface PreviewConfig {
   /** Editable sample grid used by the preview. Seeded from mapping.sourceExampleRows. */
   sampleHeaders: string[];
   sampleRows: string[][];
+  /**
+   * Editable DESTINATION sample grid, used only by "lookup" (kind === "lookup").
+   * Present but unused for the other four kinds -- this type stays a flat
+   * interface rather than a discriminated union, matching the rest of this
+   * file's style. Lookup is the only operation that reads existing
+   * destination rows before writing, so it needs its own sample table
+   * distinct from `sampleHeaders`/`sampleRows`, which are always the SOURCE.
+   */
+  destSampleHeaders: string[];
+  destSampleRows: string[][];
 }
 
 export function emptyPreviewConfig(): PreviewConfig {
@@ -105,6 +115,8 @@ export function emptyPreviewConfig(): PreviewConfig {
     filterValue: "",
     sampleHeaders: [],
     sampleRows: [],
+    destSampleHeaders: [],
+    destSampleRows: [],
   };
 }
 

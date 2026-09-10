@@ -302,6 +302,134 @@ describe("simulatePreview — deduplicate", () => {
   });
 });
 
+describe("simulatePreview — lookup", () => {
+  const SOURCE_HEADERS = ["Account", "debt", "credit"];
+  const SOURCE_ROWS = [
+    ["Cash", "100", "0"],
+    ["Receivables", "50", "10"],
+    ["Cash", "999", "999"], // duplicate key: "Cash" already seen, first wins
+  ];
+  const DEST_HEADERS = ["Account", "debt", "credit", "ending"];
+
+  function lookupConfig(overrides: Partial<PreviewConfig> = {}): PreviewConfig {
+    return config({
+      kind: "lookup",
+      keyColumn: "Account",
+      sampleHeaders: SOURCE_HEADERS,
+      sampleRows: SOURCE_ROWS,
+      destSampleHeaders: DEST_HEADERS,
+      destSampleRows: [
+        ["Cash", "", "", "500"],
+        ["Payables", "", "", "20"], // no match in source
+        ["Receivables", "", "", "0"],
+      ],
+      ...overrides,
+    });
+  }
+
+  it("fills matched columns from the first matching source row and reports counts", () => {
+    const outcome = simulatePreview(lookupConfig());
+    expect(outcome.status).toBe("ok");
+    expect(outcome.after.headers).toEqual(DEST_HEADERS);
+    expect(outcome.after.rows).toEqual([
+      ["Cash", "100", "0", "500"],
+      ["Payables", "", "", "20"],
+      ["Receivables", "50", "10", "0"],
+    ]);
+    expect(outcome.notes.join(" ")).toMatch(/2 of 3 destination row\(s\) matched/i);
+  });
+
+  it("leaves an unmatched destination row byte-for-byte identical in before and after", () => {
+    const outcome = simulatePreview(lookupConfig());
+    const before = outcome.before.rows.find((r) => r[0] === "Payables");
+    const after = outcome.after.rows.find((r) => r[0] === "Payables");
+    expect(after).toEqual(before);
+    expect(after).toEqual(["Payables", "", "", "20"]);
+  });
+
+  it("silently ignores a source key that never appears in the destination", () => {
+    const outcome = simulatePreview(
+      lookupConfig({
+        sampleRows: [...SOURCE_ROWS, ["Prepaid Insurance", "5", "5"]],
+      })
+    );
+    expect(outcome.after.rows.some((r) => r[0] === "Prepaid Insurance")).toBe(false);
+    expect(outcome.after.rows.length).toBe(3);
+  });
+
+  it("keeps a destination column with no source counterpart completely untouched", () => {
+    const outcome = simulatePreview(lookupConfig());
+    // "ending" has no source column at all; every row's value must survive
+    // as typed, including the pre-set 500/20/0.
+    const endingValues = outcome.after.rows.map((r) => r[3]);
+    expect(endingValues).toEqual(["500", "20", "0"]);
+  });
+
+  it("reports a duplicate source key and keeps the FIRST matching row's values", () => {
+    const outcome = simulatePreview(lookupConfig());
+    const cashRow = outcome.after.rows.find((r) => r[0] === "Cash");
+    // First source row for "Cash" is ["Cash", "100", "0"], not the later
+    // ["Cash", "999", "999"].
+    expect(cashRow).toEqual(["Cash", "100", "0", "500"]);
+    expect(outcome.notes.join(" ")).toMatch(/duplicate source key/i);
+  });
+
+  it("matches keys case- and whitespace-insensitively", () => {
+    const outcome = simulatePreview(
+      lookupConfig({
+        destSampleRows: [["  cash  ", "", "", "500"]],
+      })
+    );
+    expect(outcome.after.rows[0]).toEqual(["  cash  ", "100", "0", "500"]);
+  });
+
+  it("refuses when the key column is missing from the source headers", () => {
+    const outcome = simulatePreview(lookupConfig({ keyColumn: "Customer" }));
+    expect(outcome.status).toBe("error");
+    expect(outcome.message).toContain("Customer");
+  });
+
+  it("refuses when the key column is missing from the destination headers", () => {
+    const outcome = simulatePreview(
+      lookupConfig({ destSampleHeaders: ["Acct", "debt", "credit"], destSampleRows: [["Cash", "", ""]] })
+    );
+    expect(outcome.status).toBe("error");
+    expect(outcome.message).toMatch(/Account/);
+  });
+
+  it("refuses with not-configured when the destination sample has no rows", () => {
+    const outcome = simulatePreview(lookupConfig({ destSampleRows: [] }));
+    expect(outcome.status).toBe("not-configured");
+    expect(outcome.message).toMatch(/destination sample row/i);
+  });
+
+  it("refuses with not-configured when the destination sample has no columns", () => {
+    const outcome = simulatePreview(lookupConfig({ destSampleHeaders: [], destSampleRows: [] }));
+    expect(outcome.status).toBe("not-configured");
+    expect(outcome.message).toMatch(/destination column headers/i);
+  });
+
+  it("skips a blank destination key as unmatched rather than matching a blank source key", () => {
+    const outcome = simulatePreview(
+      lookupConfig({ destSampleRows: [["", "", "", "500"]] })
+    );
+    expect(outcome.after.rows[0]).toEqual(["", "", "", "500"]);
+    expect(outcome.notes.join(" ")).toMatch(/0 of 1 destination row\(s\) matched/i);
+  });
+
+  it("only fills destination columns whose heading also exists on the source side", () => {
+    const outcome = simulatePreview(
+      lookupConfig({
+        sampleHeaders: ["Account", "debt"], // no "credit" column on the source side
+        sampleRows: [["Cash", "100"]],
+        destSampleRows: [["Cash", "", "existing-credit", "500"]],
+      })
+    );
+    // "credit" has no source counterpart, so it must survive unchanged.
+    expect(outcome.after.rows[0]).toEqual(["Cash", "100", "existing-credit", "500"]);
+  });
+});
+
 describe("simulatePreview — caps", () => {
   it("truncates and notes excess rows", () => {
     const many = Array.from({ length: MAX_PREVIEW_ROWS + 10 }, (_, i) => ["East", String(i)]);

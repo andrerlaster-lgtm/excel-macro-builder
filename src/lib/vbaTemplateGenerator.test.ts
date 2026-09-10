@@ -536,6 +536,189 @@ describe("generateVbaFromTemplate — safety scanner behaviour", () => {
 // values -- with the numeric-parsing tolerances asserted on the simulator side
 // and their counterparts asserted present in the emitted VBA.
 // ---------------------------------------------------------------------------
+function lookupForm(): MacroFormData {
+  const form = baseForm();
+  form.preview.kind = "lookup";
+  form.preview.keyColumn = "Account Name";
+  form.preview.valueColumn = "";
+  return form;
+}
+
+describe("generateVbaFromTemplate — lookup", () => {
+  it("emits header-matched cell writes into a range read via ResolveDataRange, not a positional block", () => {
+    const { vbaCode, status } = generateVbaFromTemplate(lookupForm());
+    expect(status).toBe("ok");
+    expect(vbaCode).toContain("Set destRange = ResolveDataRange(destSheet, DEST_RANGE_OR_TABLE)");
+    expect(vbaCode).toContain("Set destHeaderRow = destRange.Rows(1)");
+    expect(vbaCode).toContain(
+      "Set destDataBody = destRange.Offset(1, 0).Resize(destRange.Rows.Count - 1, destRange.Columns.Count)"
+    );
+    expect(vbaCode).toContain("destKeyColumn = ColumnIndexByHeader(destHeaderRow, KEY_HEADER)");
+    expect(vbaCode).toContain("destColumnMap(c) = ColumnIndexByHeader(destHeaderRow, CellText(headerRow.Cells(1, c).Value))");
+    expect(vbaCode).toContain("destDataBody.Cells(r, destColumnMap(c)).Value = sourceValues(matchedSourceRow, c)");
+    // Never a bulk/positional write into the destination.
+    expect(vbaCode).not.toMatch(/destDataBody\.Resize\([^)]*\)\.Value\s*=/);
+    expect(vbaCode).not.toMatch(/destDataBody\.Cells\(1, 1\)\.Resize/);
+  });
+
+  it("never references a column that exists on only one side in a write statement", () => {
+    // The destination's "ending" column and any source-only column must
+    // never be force-fed a value: the map lookup simply returns 0 for them,
+    // and the write is guarded by `If destColumnMap(c) <> 0`.
+    const { vbaCode } = generateVbaFromTemplate(lookupForm());
+    expect(vbaCode).toContain("If destColumnMap(c) <> 0 Then");
+    expect(vbaCode).toContain("destColumnMap(c) = 0"); // the key column itself is deliberately excluded
+  });
+
+  it("refuses when the destination cannot resolve to a table/range at runtime with a clear Err.Raise, naming a header row and data rows requirement", () => {
+    const { vbaCode } = generateVbaFromTemplate(lookupForm());
+    expect(vbaCode).toMatch(/Err\.Raise ERR_BASE \+ 13,[^\n]*No table or range named/);
+    expect(vbaCode).toMatch(/Err\.Raise ERR_BASE \+ 14,[^\n]*no data rows underneath its header row/);
+    expect(vbaCode).toMatch(/Err\.Raise ERR_BASE \+ 15,[^\n]*was not found in the destination header row/);
+  });
+
+  it("refuses (status unsupported) when the key column is blank or not found in the source headers", () => {
+    const blankKey = lookupForm();
+    blankKey.preview.keyColumn = "";
+    const blankResult = generateVbaFromTemplate(blankKey);
+    expect(blankResult.status).toBe("unsupported");
+    expect(blankResult.vbaCode).toBe("");
+    expect(blankResult.message).toMatch(/none is set/i);
+
+    const badKey = lookupForm();
+    badKey.preview.keyColumn = "Cost Centre";
+    const badResult = generateVbaFromTemplate(badKey);
+    expect(badResult.status).toBe("unsupported");
+    expect(badResult.message).toMatch(/not one of the source column headers/i);
+  });
+
+  it("never emits ClearContents or ListRows.Add anywhere in a lookup-generated macro", () => {
+    for (const form of [lookupForm(), (() => {
+      const f = lookupForm();
+      f.mapping.sameWorkbook = false;
+      f.mapping.destinationWorkbook = { notApplicable: false, value: "Sample_Monthly_Report.xlsx" };
+      f.mapping.destinationRangeOrTable = "tblSummary";
+      return f;
+    })()]) {
+      const { vbaCode } = generateVbaFromTemplate(form);
+      expect(vbaCode).not.toContain("ClearContents");
+      expect(vbaCode).not.toContain("ListRows.Add");
+    }
+  });
+
+  it("ignores appendOrOverwrite entirely for lookup: overwrite and not-applicable produce equivalent lookup logic", () => {
+    const overwriteForm = lookupForm();
+    overwriteForm.mapping.appendOrOverwrite = "overwrite";
+    const naForm = lookupForm();
+    naForm.mapping.appendOrOverwrite = "not-applicable";
+
+    const overwrite = generateVbaFromTemplate(overwriteForm);
+    const na = generateVbaFromTemplate(naForm);
+    expect(overwrite.vbaCode).toBe(na.vbaCode);
+    // And the "overwrite mode clears things" caution must NOT appear for lookup.
+    expect(overwrite.safetyCautions.join(" ")).not.toMatch(/writes in overwrite mode/i);
+    expect(overwrite.safetyCautions.join(" ")).toMatch(/updates existing destination rows in place/i);
+  });
+
+  it("same-workbook and cross-workbook variants both produce sensible, differing code", () => {
+    const same = generateVbaFromTemplate(lookupForm());
+    const crossForm = lookupForm();
+    crossForm.mapping.sameWorkbook = false;
+    crossForm.mapping.destinationWorkbook = { notApplicable: false, value: "Sample_Monthly_Report.xlsx" };
+    crossForm.mapping.destinationRangeOrTable = "tblSummary";
+    const cross = generateVbaFromTemplate(crossForm);
+
+    expect(same.status).toBe("ok");
+    expect(cross.status).toBe("ok");
+    expect(same.vbaCode).toContain("Set destBook = sourceBook");
+    expect(cross.vbaCode).toContain("Set destBook = FindOpenWorkbook(FileNameOnly(DEST_WORKBOOK_PATH))");
+    expect(cross.vbaCode).toContain("Deliberately NOT saved and NOT closed");
+    expect(same.vbaCode).not.toBe(cross.vbaCode);
+  });
+
+  it("feeds lookup output through the safety scanner with real (unweakened) results", () => {
+    const { vbaCode } = generateVbaFromTemplate(lookupForm());
+    expect(scanVbaForWarnings(vbaCode)).toEqual([]);
+    // The scanner still fires on genuinely dangerous VBA -- the empty result
+    // above is meaningful, not just an artefact of a hobbled scanner.
+    expect(scanVbaForWarnings('Sub A()\n    Kill "C:\\temp\\x.xlsx"\nEnd Sub').length).toBeGreaterThan(0);
+  });
+
+  it("reports matched/unmatched/destination-row counts in the final message box", () => {
+    const { vbaCode } = generateVbaFromTemplate(lookupForm());
+    expect(vbaCode).toContain('"Destination rows read: " & destDataBody.Rows.Count & vbCrLf & _');
+    expect(vbaCode).toContain('"Matched and updated: " & matchedCount & vbCrLf & _');
+    expect(vbaCode).toContain('"No match in the source, left unchanged: " & unmatchedCount & _');
+  });
+
+  it("indexes the source by key with first-occurrence-wins, matching this file's deduplicate convention", () => {
+    const { vbaCode } = generateVbaFromTemplate(lookupForm());
+    expect(vbaCode).toContain("Set sourceIndex = New Collection");
+    expect(vbaCode).toContain("If Not CollectionHasKey(sourceIndex, normalizedKey) Then");
+    expect(vbaCode).toContain("sourceIndex.Add r, normalizedKey");
+  });
+
+  it("standard VBA quality invariants hold for lookup too", () => {
+    const { vbaCode } = generateVbaFromTemplate(lookupForm());
+    expect(vbaCode.startsWith("Option Explicit\n")).toBe(true);
+    expect(vbaCode).toContain("On Error GoTo CleanFail");
+    expect(vbaCode).toContain("CleanFail:");
+    expect(vbaCode).toContain("Cleanup:");
+    expectNoForbiddenIdioms(vbaCode);
+    for (const setting of ["ScreenUpdating", "EnableEvents", "DisplayAlerts", "Calculation"]) {
+      expect(vbaCode).toContain(`prev${setting} = Application.${setting}`);
+      expect(vbaCode).toContain(`Application.${setting} = prev${setting}`);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Shared fixture: lookup's declared semantics vs previewSimulator's
+// simulateLookup. The VBA cannot be executed here, so this pins the two
+// implementations together on: first-match-wins on a duplicate source key,
+// an unmatched destination row is left untouched, and an unmatched source
+// key is simply ignored (never creates a row).
+// ---------------------------------------------------------------------------
+describe("lookup template semantics agree with previewSimulator", () => {
+  it("both use first-occurrence-wins on a duplicate source key", () => {
+    const form = lookupForm();
+    form.preview.sampleHeaders = ["Account Name", "Account Number", "Amount"];
+    form.preview.sampleRows = [
+      ["Cash - Operating", "1000", "12500"],
+      ["Cash - Operating", "1000", "4200"],
+    ];
+    form.preview.destSampleHeaders = ["Account Name", "Amount"];
+    form.preview.destSampleRows = [["Cash - Operating", "0"]];
+
+    const preview = simulatePreview(form.preview);
+    expect(preview.status).toBe("ok");
+    expect(preview.after.rows[0]).toEqual(["Cash - Operating", "12500"]);
+    expect(preview.notes.join(" ")).toMatch(/duplicate source key/i);
+
+    const template = generateVbaFromTemplate(form);
+    expect(template.status).toBe("ok");
+    expect(template.vbaCode).toContain("If Not CollectionHasKey(sourceIndex, normalizedKey) Then");
+    expect(template.vbaCode).toContain("sourceIndex.Add r, normalizedKey");
+  });
+
+  it("both leave an unmatched destination row untouched and ignore an unmatched source key", () => {
+    const form = lookupForm();
+    form.preview.sampleHeaders = ["Account Name", "Amount"];
+    form.preview.sampleRows = [["Accounts Receivable", "8300"]]; // never appears in destination
+    form.preview.destSampleHeaders = ["Account Name", "Amount"];
+    form.preview.destSampleRows = [["Prepaid Insurance", "999"]]; // never appears in source
+
+    const preview = simulatePreview(form.preview);
+    expect(preview.after.rows).toEqual([["Prepaid Insurance", "999"]]);
+    expect(preview.notes.join(" ")).toMatch(/0 of 1 destination row\(s\) matched/);
+
+    const template = generateVbaFromTemplate(form);
+    expect(template.vbaCode).toContain("unmatchedCount = unmatchedCount + 1");
+    // No row-creation idiom anywhere near the lookup write path.
+    expect(template.vbaCode).not.toContain("ListRows.Add");
+  });
+});
+
 describe("template semantics agree with previewSimulator", () => {
   const SAMPLE_HEADERS = ["Account Name", "Account Number", "Amount"];
   const SAMPLE_ROWS = [
